@@ -1,0 +1,28 @@
+{
+  "name": "@orbit/connect-js",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Embeddable browser SDK for Connect: one call opens a modal that connects an end user's domain.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "sideEffects": [
+    "./src/global.ts"
+  ],
+  "scripts": {
+    "build": "esbuild src/global.ts --bundle --format=iife --minify --target=es2019 --outfile=dist/connect.js && esbuild src/index.ts --bundle --format=esm --target=es2019 --outfile=dist/connect.esm.js",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "@orbit/shared": "*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.7",
+    "typescript": "~6.0.2"
+  }
+}

@@ -6,6 +6,8 @@ import { config } from "./controllers/config.controller.ts";
 import { dev } from "./controllers/dev.controller.ts";
 import { invites } from "./controllers/invites.controller.ts";
 import { workspaces } from "./controllers/workspaces.controller.ts";
+import { connectPublic } from "./controllers/connect.controller.ts";
+import { connectDashboard } from "./controllers/connect-dashboard.controller.ts";
 // +feature:billing
 import { billing, billingWebhooks } from "./controllers/billing.controller.ts";
 // -feature:billing
@@ -29,6 +31,9 @@ export function buildRouter(): Hono<HonoEnv> {
   v1.route("/me", meAccount);
   v1.route("/invites", invites);
   v1.route("/workspaces", workspaces);
+  v1.route("/workspaces", connectDashboard);
+  // SDK-facing: Bearer-token auth, wildcard CORS (see app.ts).
+  v1.route("/connect", connectPublic);
   // +feature:billing
   v1.route("/workspaces", billing);
   // Provider webhooks live at the top level. These are authenticated

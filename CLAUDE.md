@@ -52,6 +52,29 @@ Product primitives:
 
 There is no messaging / rooms / channels domain.
 
+### Connect (the product built on the kit)
+
+An Entri-style "let your users connect their own domain" product
+lives on top of the kit — full contract in `docs/connect.md`:
+
+- `apps/api/src/connect/` — bounded context: applications (appId +
+  hashed secret), SDK tokens (HS256, 1h, revoked on secret rotation),
+  domain connections (pending → propagating → connected / failed),
+  signed webhook deliveries with retry sweep.
+- `connect/infrastructure/providers/` — 12 automated DNS adapters
+  (Cloudflare, GoDaddy, Route 53, …) + NS-based detection catalog.
+  Credentials pasted by end users are used once, never stored/logged.
+- `connect/infrastructure/sandbox-dns.ts` — fake provider for `*.test`
+  domains (dev default) so the whole flow runs locally.
+- `packages/connect-js` — embeddable modal SDK (`showConnect()`),
+  shadow-DOM, served by the API at `/sdk/connect.js` after
+  `npm run build --workspace @orbit/connect-js`.
+- `apps/web-tanstack/src/pages/connect/` — dashboard (applications,
+  domains, playground, guide). Permissions: `connect.*`.
+
+Connect code is intentionally **not** feature-fenced — it's the core
+of this product, not an optional kit feature.
+
 ### Paid vs free tier
 
 Paid features (`teams`, `billing` + each provider, `uploads`, `waitlist`,

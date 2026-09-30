@@ -404,3 +404,88 @@ export const workspaceAuditEntries = pgTable(
   ],
 );
 // -feature:audit-log
+
+// ── Connect ─────────────────────────────────────────────────────────────
+
+export const connectApplications = pgTable(
+  "connect_applications",
+  {
+    id: text("id").primaryKey(),
+    workspaceId: text("workspaceId")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    iconUrl: text("iconUrl"),
+    secretHash: text("secretHash").notNull(),
+    secretPreview: text("secretPreview").notNull(),
+    secretVersion: integer("secretVersion").notNull().default(1),
+    secretRotatedAt: timestamp("secretRotatedAt", { mode: "date", precision: 3 }).notNull(),
+    allowedOrigins: json("allowedOrigins").$type<string[]>().notNull(),
+    webhookUrl: text("webhookUrl"),
+    webhookSecret: text("webhookSecret").notNull(),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull(),
+  },
+  (t) => [index("connect_applications_workspaceId_idx").on(t.workspaceId)],
+);
+
+export const domainConnections = pgTable(
+  "domain_connections",
+  {
+    id: text("id").primaryKey(),
+    applicationId: text("applicationId")
+      .notNull()
+      .references(() => connectApplications.id, { onDelete: "cascade" }),
+    workspaceId: text("workspaceId")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    domain: text("domain").notNull(),
+    rootDomain: text("rootDomain").notNull(),
+    subdomain: text("subdomain"),
+    userId: text("userId"),
+    metadata: json("metadata").$type<Record<string, unknown> | null>(),
+    providerKey: text("providerKey"),
+    setupMethod: text("setupMethod"),
+    status: text("status").notNull(),
+    records: json("records").notNull(),
+    lastError: text("lastError"),
+    lastCheckedAt: timestamp("lastCheckedAt", { mode: "date", precision: 3 }),
+    connectedAt: timestamp("connectedAt", { mode: "date", precision: 3 }),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull(),
+    updatedAt: timestamp("updatedAt", { mode: "date", precision: 3 }).notNull(),
+  },
+  (t) => [
+    index("domain_connections_workspaceId_createdAt_idx").on(t.workspaceId, t.createdAt, t.id),
+    index("domain_connections_applicationId_createdAt_idx").on(
+      t.applicationId,
+      t.createdAt,
+      t.id,
+    ),
+    index("domain_connections_domain_idx").on(t.domain),
+  ],
+);
+
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: text("id").primaryKey(),
+    applicationId: text("applicationId")
+      .notNull()
+      .references(() => connectApplications.id, { onDelete: "cascade" }),
+    connectionId: text("connectionId"),
+    eventType: text("eventType").notNull(),
+    url: text("url").notNull(),
+    payload: json("payload").notNull(),
+    status: text("status").notNull(),
+    attempts: integer("attempts").notNull().default(0),
+    lastStatusCode: integer("lastStatusCode"),
+    lastError: text("lastError"),
+    nextAttemptAt: timestamp("nextAttemptAt", { mode: "date", precision: 3 }),
+    createdAt: timestamp("createdAt", { mode: "date", precision: 3 }).notNull(),
+    deliveredAt: timestamp("deliveredAt", { mode: "date", precision: 3 }),
+  },
+  (t) => [
+    index("webhook_deliveries_applicationId_createdAt_idx").on(t.applicationId, t.createdAt),
+    index("webhook_deliveries_status_nextAttemptAt_idx").on(t.status, t.nextAttemptAt),
+  ],
+);

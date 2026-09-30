@@ -40,6 +40,12 @@ import type { FileStorage } from "@/uploads/application/file-storage.ts";
 import { identityFeature, type IdentityServices } from "@/identity/feature.ts";
 import type { UserId } from "@/identity/domain/user.ts";
 import { workspacesFeature, type WorkspacesServices } from "@/workspaces/feature.ts";
+import {
+  connectFeature,
+  readConnectConfig,
+  type ConnectConfig,
+  type ConnectServices,
+} from "@/connect/feature.ts";
 // +feature:uploads
 import { buildFileStorage, readUploadsConfig, type UploadsConfig } from "@/uploads/feature.ts";
 // -feature:uploads
@@ -93,6 +99,8 @@ export interface AppConfig {
    * subdomain is readable on the app subdomain.
    */
   cookieDomain?: string;
+  /** Connect (domain connection product). See `connect/feature.ts`. */
+  connect: ConnectConfig;
   // +feature:auth-oauth
   social?: {
     google?: { clientId: string; clientSecret: string };
@@ -136,6 +144,7 @@ export interface AppConfig {
  */
 export type AppServices = IdentityServices &
   WorkspacesServices &
+  ConnectServices &
   // +feature:billing
   BillingServices &
   // -feature:billing
@@ -336,6 +345,7 @@ export function readConfig(): AppConfig {
       .filter(Boolean),
     cookieSecure: (process.env.NODE_ENV ?? "development") === "production",
     cookieDomain: process.env.AUTH_COOKIE_DOMAIN?.trim() || undefined,
+    connect: readConnectConfig(),
     // +feature:auth-oauth
     social: Object.keys(social).length > 0 ? social : undefined,
     // -feature:auth-oauth
@@ -444,6 +454,7 @@ export function buildContainer(
       return {
         ...identitySvc,
         ...workspacesSvc,
+        ...connectFeature.services(core),
         // +feature:billing
         ...billingFeature.services(core),
         // -feature:billing
@@ -536,5 +547,5 @@ export function startBackgroundWork(container: AppContainer): void {
   // +feature:audit-log
   container.background.auditProjector.start();
   // -feature:audit-log
-  void container;
+  container.services.connectWebhooks.start();
 }

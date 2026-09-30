@@ -17,7 +17,12 @@ export type LucideIconName =
   | "shield"
   | "plug"
   | "book"
-  | "sparkles";
+  | "sparkles"
+  | "link"
+  | "app-window"
+  | "globe"
+  | "flask-conical"
+  | "book-open";
 
 export type NavLeaf = {
   key: string;
@@ -47,6 +52,40 @@ export function isNavGroup(item: NavItem): item is NavGroup {
 
 export const navMainItems: NavItem[] = [
   { key: "home", title: "Home", icon: "home", segment: "" },
+  {
+    key: "connect",
+    title: "Connect",
+    icon: "link",
+    items: [
+      {
+        key: "connect-applications",
+        title: "Applications",
+        icon: "app-window",
+        segment: "connect/applications",
+        permission: "connect.applications.view",
+      },
+      {
+        key: "connect-domains",
+        title: "Domains",
+        icon: "globe",
+        segment: "connect/domains",
+        permission: "connect.domains.view",
+      },
+      {
+        key: "connect-playground",
+        title: "Playground",
+        icon: "flask-conical",
+        segment: "connect/playground",
+        permission: "connect.applications.manage",
+      },
+      {
+        key: "connect-guide",
+        title: "Integration guide",
+        icon: "book-open",
+        segment: "connect/guide",
+      },
+    ],
+  },
   // +feature:billing
   {
     key: "billing",

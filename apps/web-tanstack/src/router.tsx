@@ -1,6 +1,6 @@
 import { createRouter } from '@tanstack/react-router'
 import { routeTree } from './routeTree.gen'
-import { queryClient } from '@/lib/query-client'
+import { createQueryClient, queryClient } from '@/lib/query-client'
 import type { OrbitRouterContext } from '@/lib/router-context'
 
 function DefaultNotFound() {
@@ -23,7 +23,8 @@ export function getRouter() {
     defaultPreload: 'intent',
     defaultNotFoundComponent: DefaultNotFound,
     context: {
-      queryClient,
+      // One cache per SSR request; the browser keeps the shared singleton.
+      queryClient: typeof window === 'undefined' ? createQueryClient() : queryClient,
     } satisfies OrbitRouterContext,
   })
 

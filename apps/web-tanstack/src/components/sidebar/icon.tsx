@@ -1,6 +1,11 @@
 import type { LucideIconName } from "@orbit/shared/navigation";
 import {
+  AppWindowIcon,
   BookIcon,
+  BookOpenIcon,
+  FlaskConicalIcon,
+  GlobeIcon,
+  LinkIcon,
   CreditCardIcon,
   HomeIcon,
   type LucideIcon,
@@ -26,6 +31,11 @@ const ICONS: Record<LucideIconName, LucideIcon> = {
   plug: PlugIcon,
   book: BookIcon,
   sparkles: SparklesIcon,
+  link: LinkIcon,
+  "app-window": AppWindowIcon,
+  globe: GlobeIcon,
+  "flask-conical": FlaskConicalIcon,
+  "book-open": BookOpenIcon,
 };
 
 export function NavIcon({

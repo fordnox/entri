@@ -19,6 +19,9 @@ export const ID_PREFIX = {
   waitlistEntry: "wl",
   appAuditEntry: "al",
   workspaceAuditEntry: "wal",
+  connectApplication: "app",
+  domainConnection: "dconn",
+  webhookDelivery: "whd",
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

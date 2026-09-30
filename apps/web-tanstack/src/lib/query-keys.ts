@@ -24,6 +24,26 @@ export const queryKeys = {
     [...queryKeys.team(slug, teamId), "roles"] as const,
   billing: (slug: string) =>
     [...queryKeys.workspace(), "billing", slug] as const,
+  connect: (slug: string) =>
+    [...queryKeys.workspace(), "connect", slug] as const,
+  connectApplications: (slug: string) =>
+    [...queryKeys.connect(slug), "applications"] as const,
+  connectApplication: (slug: string, appId: string) =>
+    [...queryKeys.connectApplications(slug), appId] as const,
+  connectDeliveries: (slug: string, appId: string) =>
+    [...queryKeys.connectApplication(slug, appId), "deliveries"] as const,
+  connectDomains: (slug: string) =>
+    [...queryKeys.connect(slug), "domains"] as const,
+  connectDomainList: (
+    slug: string,
+    filters: { applicationId?: string; status?: string; q?: string },
+  ) => [...queryKeys.connectDomains(slug), "list", filters] as const,
+  /** Single first page per status — used for overview counts, not the infinite list. */
+  connectDomainCount: (slug: string, status: string) =>
+    [...queryKeys.connectDomains(slug), "count", status] as const,
+  connectDomain: (slug: string, connectionId: string) =>
+    [...queryKeys.connectDomains(slug), "detail", connectionId] as const,
+  connectProviders: () => [...queryKeys.root, "connect", "providers"] as const,
   // +feature:audit-log
   workspaceAudit: (slug: string) =>
     [...queryKeys.workspace(), "audit", slug] as const,

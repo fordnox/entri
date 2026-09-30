@@ -6,6 +6,9 @@ import { DrizzleWorkspaceInviteRepository } from "@/workspaces/infrastructure/dr
 import { DrizzleWorkspaceMemberRepository } from "@/workspaces/infrastructure/drizzle-workspace-member.repository.ts";
 import { DrizzleWorkspaceRoleRepository } from "@/workspaces/infrastructure/drizzle-workspace-role.repository.ts";
 import { DrizzleWorkspaceRepository } from "@/workspaces/infrastructure/drizzle-workspace.repository.ts";
+import { DrizzleConnectApplicationRepository } from "@/connect/infrastructure/drizzle-connect-application.repository.ts";
+import { DrizzleDomainConnectionRepository } from "@/connect/infrastructure/drizzle-domain-connection.repository.ts";
+import { DrizzleWebhookDeliveryRepository } from "@/connect/infrastructure/drizzle-webhook-delivery.repository.ts";
 // +feature:billing
 import { DrizzleBillingCustomerRepository } from "@/billing/infrastructure/drizzle-billing-customer.repository.ts";
 import { DrizzleBillingEventRepository } from "@/billing/infrastructure/drizzle-billing-event.repository.ts";
@@ -50,6 +53,9 @@ export class DrizzleUnitOfWork extends BaseUnitOfWork<Drizzle> {
       workspaceMembers: new DrizzleWorkspaceMemberRepository(db),
       workspaceInvites: new DrizzleWorkspaceInviteRepository(db),
       workspaceRoles: new DrizzleWorkspaceRoleRepository(db),
+      connectApplications: new DrizzleConnectApplicationRepository(db),
+      domainConnections: new DrizzleDomainConnectionRepository(db),
+      webhookDeliveries: new DrizzleWebhookDeliveryRepository(db),
       // +feature:billing
       billingCustomers: new DrizzleBillingCustomerRepository(db),
       subscriptions: new DrizzleSubscriptionRepository(db),

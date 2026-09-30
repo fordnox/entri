@@ -137,3 +137,58 @@ export const submitOnboardingIntentSchema = z.object({
     }),
   invitedEmails: z.array(emailSchema.max(254)).max(50).default([]),
 });
+
+// ── Connect ─────────────────────────────────────────────────────────────
+
+const dnsRecordSchema = z.object({
+  type: z.string().min(1).max(8),
+  host: z.string().max(253),
+  value: z.string().max(2048),
+  ttl: z.number().int().optional(),
+  priority: z.number().int().optional(),
+});
+
+export const dnsRecordsConfigSchema = z.union([
+  z.array(dnsRecordSchema).max(20),
+  z.object({
+    domain: z.array(dnsRecordSchema).max(20),
+    subDomain: z.array(dnsRecordSchema).max(20),
+  }),
+]);
+
+export const issueTokenSchema = z.object({
+  applicationId: z.string().min(1).max(64),
+  secret: z.string().min(1).max(128),
+});
+
+export const checkDomainSchema = z.object({
+  domain: z.string().min(1).max(300),
+});
+
+export const createConfigurationSchema = z.object({
+  domain: z.string().min(1).max(300),
+  dnsRecords: dnsRecordsConfigSchema,
+  userId: z.string().max(256).optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+export const automateConfigurationSchema = z.object({
+  credentials: z.record(z.string().max(64), z.string().max(4096)),
+});
+
+const applicationSettingsShape = {
+  name: z.string().min(1).max(64),
+  iconUrl: z.string().max(2048).nullable().optional(),
+  allowedOrigins: z.array(z.string().max(300)).max(20).optional(),
+  webhookUrl: z.string().max(2048).nullable().optional(),
+};
+
+export const createApplicationSchema = z.object(applicationSettingsShape);
+export const updateApplicationSchema = z.object(applicationSettingsShape).partial();
+
+export const listDomainConnectionsQuerySchema = z.object({
+  applicationId: z.string().max(64).optional(),
+  status: z.enum(["pending", "propagating", "connected", "failed"]).optional(),
+  q: z.string().trim().max(160).optional(),
+  cursor: z.string().max(200).optional(),
+});

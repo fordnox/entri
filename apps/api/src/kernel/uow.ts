@@ -6,6 +6,11 @@ import type {
   WorkspaceRepository,
   WorkspaceRoleRepository,
 } from "@/workspaces/domain/repositories.ts";
+import type {
+  ConnectApplicationRepository,
+  DomainConnectionRepository,
+  WebhookDeliveryRepository,
+} from "@/connect/domain/repositories.ts";
 // +feature:billing
 import type {
   BillingCustomerRepository,
@@ -37,6 +42,9 @@ export interface TxContext {
   workspaceMembers: WorkspaceMemberRepository;
   workspaceInvites: WorkspaceInviteRepository;
   workspaceRoles: WorkspaceRoleRepository;
+  connectApplications: ConnectApplicationRepository;
+  domainConnections: DomainConnectionRepository;
+  webhookDeliveries: WebhookDeliveryRepository;
   // +feature:billing
   billingCustomers: BillingCustomerRepository;
   subscriptions: SubscriptionRepository;
