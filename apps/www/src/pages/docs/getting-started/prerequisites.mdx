@@ -1,0 +1,77 @@
+---
+title: Prerequisites
+description: A short list of tools you'll need on your machine before running the CLI.
+kicker: 01 · Getting started
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+<DocsTable
+  columns={["Tool", "Version", "Notes"]}
+  rows={[
+    [
+      <code>Node.js</code>,
+      "≥ 18.17",
+      "20 or 22 LTS recommended — React 19 and the ORM client use modern APIs.",
+    ],
+    [
+      <code>npm</code>,
+      "10.9.7",
+      <>
+        Pinned via the root <code>packageManager</code> field. pnpm and yarn aren't tested.
+      </>,
+    ],
+    [
+      <code>PostgreSQL</code>,
+      "≥ 14",
+      "Not included in docker-compose — point DATABASE_URL at any Postgres.",
+    ],
+    [
+      <code>Git</code>,
+      "any",
+      "The CLI clones the template from GitHub.",
+    ],
+  ]}
+/>
+
+## Node
+
+The CLI declares `engines.node >= 18`, but the starter uses React 19, a modern ORM client, and native fetch in the API — stick to Node 20 or 22 LTS for the smoothest ride.
+
+If you're on macOS, the quickest path is `brew install node`. For version management, Volta and fnm both work well.
+
+## Package manager
+
+The repo is pinned to npm via the `"packageManager": "npm@10.9.7"` field in the root `package.json`. Every workspace script expects `npm run`, and the lockfile is `package-lock.json`. Turbo drives the workspaces from there.
+
+<DocsCallout>
+  Nothing stops you from swapping in pnpm or yarn, but you'll be off the tested path. Hooks, turbo filters, and the workspace layout were all written against npm.
+</DocsCallout>
+
+## PostgreSQL
+
+Orbit's `docker-compose.yml` intentionally does *not* ship a Postgres container — you're expected to bring your own. In practice that means one of:
+
+- A local Postgres from Homebrew, Postgres.app, or a plain Docker container you manage yourself.
+- A managed provider: Neon, Supabase, Railway, Render, or RDS all work out of the box.
+
+Whatever you pick, you'll end up with a URL that looks like this and goes into `apps/api/.env`:
+
+**apps/api/.env**
+
+```bash
+DATABASE_URL="postgresql://postgres@127.0.0.1:5432/orbit?schema=public"
+```
+
+<DocsCallout kind="warn">
+  If your provider uses a transaction pooler (PgBouncer, PlanetScale psdb), set <code>DIRECT_DATABASE_URL</code> to a non-pooled URL as well — migrations (drizzle-kit) and graphile-worker both need advisory locks and long-lived connections that poolers drop.
+</DocsCallout>
+
+## Git
+
+The CLI clones `https://github.com/were-orbit/orbit-starter.git` under the hood. Any recent `git` version works; you don't need an SSH key — the default is an HTTPS clone.
+
+## Optional
+
+- **Docker** — only if you want to run the three apps in containers via `docker-compose up`. Dev works fine without it.
+- **smee.io** — for local Stripe / Polar / Dodo webhook forwarding. Covered on the `npm run dev` page.

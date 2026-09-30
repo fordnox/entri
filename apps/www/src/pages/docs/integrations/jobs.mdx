@@ -1,0 +1,148 @@
+---
+title: Background jobs — graphile-worker & QStash
+description: A provider-agnostic queue, a pluggable runtime, and a registry that's typed end-to-end.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Background jobs are the one place in the stack where "do this work eventually" needs real durability — retries, idempotency, scheduling. Orbit ships two implementations of the same port so you can pick based on where you deploy: a Postgres-backed worker for long-lived VMs, and an HTTP queue for serverless.
+
+## The ports
+
+**apps/api/src/jobs/application/**
+
+```ts
+// job-queue.ts — what services call to enqueue
+export interface JobQueue {
+  enqueue<N extends JobName>(
+    name: N,
+    payload: JobPayload<N>,
+    options?: { runAt?: Date; jobKey?: string; maxAttempts?: number },
+  ): Promise<void>;
+}
+
+// job-runtime.ts — what the API boots to execute
+export interface JobRuntime {
+  readonly provider: string;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+}
+```
+
+Two ports, because the caller's concern ("enqueue this") is different from the process's concern ("drain the queue"). A serverless deployment might not run a worker at all — you'd still enqueue via `JobQueue`, and delivery would happen over HTTP to `/v1/jobs/run/:name`.
+
+## The three adapters
+
+<DocsTable
+  columns={["Provider", "Enqueue", "Execute", "Best for"]}
+  rows={[
+    [
+      <code>graphile</code>,
+      "INSERT into Postgres",
+      "Long-lived worker polls + LISTEN/NOTIFY",
+      "Single-VM or containerised deploys; zero new infra.",
+    ],
+    [
+      <code>qstash</code>,
+      "Upstash QStash publish API",
+      "POST /v1/jobs/run/:name with signature",
+      "Serverless (Vercel, Cloudflare Workers, Fly machines).",
+    ],
+    [
+      <code>noop</code>,
+      "409 errors from the port",
+      "Nothing",
+      "Running without background work (dev, tests, initial boot).",
+    ],
+  ]}
+/>
+
+### graphile-worker
+
+Stores jobs in your primary Postgres. The runtime opens a dedicated pool (`WORKER_DATABASE_URL` if set — otherwise falls back to `DATABASE_URL`) and polls plus uses LISTEN/NOTIFY for low-latency dispatch. `JOBS_CONCURRENCY` sets parallelism per instance (default `2`).
+
+<DocsCallout kind="warn">
+  graphile-worker needs long-lived sessions. If <code>DATABASE_URL</code> points at a transaction pooler (PgBouncer, PlanetScale psdb), set <code>WORKER_DATABASE_URL</code> to a direct/session URL — the pooler drops LISTEN subscriptions.
+</DocsCallout>
+
+### Upstash QStash
+
+Jobs are HTTP POSTs. On enqueue, the adapter publishes to QStash; QStash delivers to `${QSTASH_CALLBACK_URL}/v1/jobs/run/<name>` on the schedule you requested. The API verifies the signature and routes to the matching handler in the registry.
+
+- `QSTASH_TOKEN` — publish-side key.
+- `QSTASH_CURRENT_SIGNING_KEY` + `QSTASH_NEXT_SIGNING_KEY` — rotating verification keys; both checked on inbound delivery.
+- `QSTASH_CALLBACK_URL` — must be public-internet reachable. In dev, smee.io / ngrok / a Cloudflare Tunnel.
+
+### Noop
+
+Unset `JOBS_PROVIDER` (or set it to `noop`) and every `queue.enqueue()` throws a `409 jobs.not_configured`. Services that enqueue non-critical work should catch and degrade gracefully; critical-path code shouldn't enqueue at all.
+
+## Defining a job
+
+Jobs are strongly typed via module augmentation:
+
+```ts
+// apps/api/src/some-feature/jobs/cleanup.job.ts
+declare global {
+  namespace OrbitJobs {
+    interface Jobs {
+      "cleanup.stale-invites": { olderThanHours: number };
+    }
+  }
+}
+
+export const cleanupStaleInvitesJob = defineJob({
+  name: "cleanup.stale-invites",
+  schedule: "0 * * * *",              // every hour
+  maxAttempts: 3,
+  handler: async (payload, ctx) => {
+    await ctx.uow.run(async (tx) => {
+      const cutoff = subHours(ctx.clock.now(), payload.olderThanHours);
+      await tx.workspaceInvites.deleteExpiredBefore(cutoff);
+    });
+  },
+});
+```
+
+Augmenting `OrbitJobs.Jobs` makes `queue.enqueue("cleanup.stale-invites", {...})` type-check against the payload shape at the call site. Misnamed jobs and mis-shaped payloads fail at compile time, not at 03:00.
+
+## Registering jobs
+
+Each feature exports a list of job definitions; the composition root assembles them into a `JobRegistry` and hands the registry to the runtime:
+
+```ts
+// Inside a feature's feature.ts
+export function jobs(core): readonly JobDefinition[] {
+  return [cleanupStaleInvitesJob(core), /* ... */];
+}
+
+// composition.ts
+const registry = buildJobs([
+  ...workspacesFeature.jobs?.(core) ?? [],
+  ...billingFeature.jobs?.(core) ?? [],
+]);
+const runtime = buildJobRuntime(jobsConfig, registry);
+await runtime.start();
+```
+
+## The webhook endpoint
+
+When `JOBS_PROVIDER=qstash`, Orbit mounts a single route the queue calls into:
+
+```
+POST /v1/jobs/run/:name
+```
+
+1. **Read raw body & headers.** Signature verification needs exact bytes; headers are lowercased before dispatch.
+2. **Verify.** `QStashJobDispatcher` calls Upstash's `Receiver.verify()` with the current key, then the next key. Failure throws `InvalidJobSignatureError` → 401.
+3. **Parse & route.** Payload is JSON-parsed, then dispatched to `registry.find(d => d.name === name)`.
+4. **Count attempts.** QStash sends `upstash-retried`; the dispatcher adds 1 and passes `attempt` to the handler so idempotent work knows whether it's a retry.
+
+## Idempotency
+
+Jobs can fire more than once — graphile retries on thrown errors, QStash on HTTP failure. Guard rails:
+
+- **`jobKey` on enqueue.** Providers dedupe same-key enqueues when you pass one, so "send reminder for invite X" doesn't stack up.
+- **Natural keys in your write.** Prefer `UPSERT` + unique indexes over checking-then-writing — the retry will land on the same row either way.
+- **The domain event ledger.** For projector work that must-not-run-twice, use the same dedupe pattern as billing webhooks: a `processed` row keyed by the event id.

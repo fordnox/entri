@@ -1,0 +1,174 @@
+---
+title: Two-scope PBAC for multi-tenant SaaS
+description: "Permission-based access control for SaaS, in two scopes: workspace-wide and team-specific. One vocabulary, same shape on both sides."
+kicker: 02 · Concepts
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Orbit uses **permission-based access control** rather than role-based. Permissions are the primitive — roles are named bundles of them. A member "can do X" because their role grants X, not because of the role's name. The default roles are there for ergonomics; custom roles can hold any subset of permissions you want.
+
+## Two scopes, one vocabulary
+
+Every permission is a string literal declared once in `packages/shared/src/permissions.ts`. Both the API guards and the web `useCan()` hook read from the same list, so adding a permission lights up in both places at once.
+
+### Workspace-scoped
+
+Checked against the member's `WorkspaceRole`. Granted to the member for the *whole* workspace, regardless of which teams they're on.
+
+```ts
+type WorkspacePermission =
+  | "workspace.delete"
+  | "workspace.settings.edit"
+  | "workspace.roles.manage"
+  | "workspace.members.invite"
+  | "workspace.members.remove"
+  | "workspace.members.change_role"
+  | "teams.create"
+  | "teams.delete_any"
+  | "billing.view"
+  | "billing.manage";
+```
+
+### Team-scoped
+
+Checked against the member's `TeamRole` on a *specific* team. Only meaningful in the shape "this member, on this team."
+
+```ts
+type TeamPermission =
+  | "team.settings.edit"
+  | "team.delete"
+  | "team.roles.manage"
+  | "team.members.invite"
+  | "team.members.remove"
+  | "team.members.change_role";
+```
+
+<DocsCallout>
+  The two scopes share a union (<code>type Permission</code>) because a string is either a workspace permission or a team permission, never both. The <code>scopeOf(permission)</code> helper resolves which.
+</DocsCallout>
+
+## System roles
+
+<DocsTable
+  columns={["Scope", "Role", "Default permissions"]}
+  rows={[
+    [
+      "Workspace",
+      <code>OWNER</code>,
+      "All workspace permissions. Locked — cannot be renamed or have permissions edited.",
+    ],
+    [
+      "Workspace",
+      <code>ADMIN</code>,
+      "Member/role management, billing.view, teams.create, teams.delete_any. Editable.",
+    ],
+    [
+      "Workspace",
+      <code>MEMBER</code>,
+      <><code>teams.create</code> only (when teams are on) — mostly view-only. Editable.</>,
+    ],
+    [
+      "Team",
+      <code>TEAM_ADMIN</code>,
+      "All team permissions.",
+    ],
+    [
+      "Team",
+      <code>TEAM_MEMBER</code>,
+      "No team permissions by default. Visibility only.",
+    ],
+  ]}
+/>
+
+Custom roles sit alongside system roles in the same tables — both use `WorkspaceRole` / `TeamRole`. The `isSystem` and `systemKey` columns mark the reserved ones.
+
+## Enforcing it on the API
+
+Permission is checked once per request, in the controller, on a fully-hydrated `WorkspaceMember`. Services treat permission as a pre-established invariant and don't re-check.
+
+### Workspace permissions
+
+**apps/api/src/interfaces/http/middleware/session.ts**
+
+```ts
+export function requirePermission(
+  me: WorkspaceMember,
+  permission: WorkspacePermission,
+): void {
+  if (!me.hasPermission(permission)) {
+    throw new ForbiddenError("permission.denied");
+  }
+}
+```
+
+`me.hasPermission()` is an O(1) set lookup against the `WorkspaceMemberRoleSnapshot` inlined on the aggregate — no extra repository hop per guard.
+
+### Team permissions
+
+Team checks take an extra step: fetch the `TeamMember` row for `(team, workspaceMember)`, then check its role. Two useful shortcuts apply before that lookup:
+
+- Workspace owners bypass every `team.*` check outright.
+- Members with `teams.delete_any` bypass the team lookup for `team.delete` specifically — useful for workspace admins policing cleanup.
+
+Everyone else gets a `403 team.not_a_member` if they're not on the team, or `403 permission.denied` if they are but lack the specific team permission.
+
+### A full controller
+
+```ts
+app.delete("/:teamId", session(), async (c) => {
+  const { userId } = requireSession(c);
+  const { me, workspace } = await resolveWorkspaceMember(c, userId);
+
+  const teamId = zPrefixedId("team").parse(c.req.param("teamId"));
+  await requireTeamPermission(c, teamId, me, "team.delete");
+
+  await deleteTeamService.execute({ workspaceId: workspace.id, teamId, actorId: me.id });
+  return c.body(null, 204);
+});
+```
+
+## Client-side gating
+
+On the web, the same permission strings drive UI affordances. The session fetch returns the caller's `WorkspaceMemberRoleSnapshot`; the client caches it and exposes two hooks:
+
+```ts
+// Workspace-scoped
+const canInvite = useCan("workspace.members.invite");
+
+// Team-scoped — needs a team id
+const canEditSettings = useCanTeam(teamId, "team.settings.edit");
+
+return (
+  <Button disabled={!canInvite} onClick={openInviteDialog}>
+    Invite member
+  </Button>
+);
+```
+
+<DocsCallout kind="warn">
+  Client-side gating is a UX convenience, never a security boundary. The API enforces the same permission on every request; disabled buttons just save a round-trip to a <code>403</code>.
+</DocsCallout>
+
+## Changing roles and permissions
+
+Roles are just rows. The role editor in the settings UI drives three services:
+
+- `CreateRoleService` — new custom role with any subset of `ALL_WORKSPACE_PERMISSIONS`.
+- `UpdateRoleService` — rename a role, rewrite its permission set. Emits `WorkspaceRoleUpdated`.
+- `DeleteRoleService` — only for custom roles. Members holding it fall back to the workspace `MEMBER` role.
+
+Each emits a domain event, the realtime publisher picks it up post-commit, and every other open tab updates immediately — so a permission toggle is instantly reflected in UI for every session on the workspace.
+
+## Adding a permission
+
+Adding one is a three-line change followed by a wire-up:
+
+1. Add the string to the `WorkspacePermission` or `TeamPermission` union in `packages/shared/src/permissions.ts`.
+2. Add it to `ALL_WORKSPACE_PERMISSIONS` (or `ALL_TEAM_PERMISSIONS`) and, optionally, the default set for the role that should grant it by default.
+3. Add a `PermissionDescriptor` so the role editor knows how to label it.
+4. Guard the new route with `requirePermission(me, "...")`, gate the UI with `useCan("...")`.
+
+<DocsCallout>
+  TypeScript will do most of the work — the union type makes it impossible to forget a spot. If the descriptor map doesn't cover every permission, the role-editor compile-time check catches it.
+</DocsCallout>

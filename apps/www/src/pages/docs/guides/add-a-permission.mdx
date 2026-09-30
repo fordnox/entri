@@ -1,0 +1,167 @@
+---
+title: Add a permission & role check
+description: Extend the permission vocabulary, wire it to a default role, then guard the route and gate the UI.
+kicker: 03 · Guides
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+Walking example: add `projects.create` — a workspace-scoped permission for the Projects context. The same four steps work for any permission, workspace- or team-scoped.
+
+<DocsCallout>
+  TypeScript does most of the enforcement. Every downstream spot that references the permission union will fail to compile until you've covered it — a feature, not a bug.
+</DocsCallout>
+
+## 1. Extend the union
+
+Open `packages/shared/src/permissions.ts` and add the new string to the relevant union plus its "all" array:
+
+**packages/shared/src/permissions.ts**
+
+```ts
+export type WorkspacePermission =
+  | "workspace.delete"
+  | "workspace.settings.edit"
+  | "workspace.roles.manage"
+  | "workspace.members.invite"
+  | "workspace.members.remove"
+  | "workspace.members.change_role"
+  | "projects.create"                       // ← new
+  | "teams.create"
+  | "teams.delete_any"
+  // ... etc
+;
+
+export const ALL_WORKSPACE_PERMISSIONS: readonly WorkspacePermission[] = [
+  "workspace.delete",
+  "workspace.settings.edit",
+  "workspace.roles.manage",
+  "workspace.members.invite",
+  "workspace.members.remove",
+  "workspace.members.change_role",
+  "projects.create",                        // ← new
+  "teams.create",
+  // ...
+];
+```
+
+Use `TeamPermission` + `ALL_TEAM_PERMISSIONS` for team-scoped permissions (names starting with `team.`).
+
+## 2. Add a descriptor
+
+`PERMISSION_GROUPS` is what the role editor reads to render the checkbox list. Add an item to an existing group or create a new group:
+
+```ts
+export const PERMISSION_GROUPS: readonly PermissionGroup[] = [
+  // ...existing groups...
+  {
+    group: "Projects",
+    scope: "workspace",
+    items: [
+      {
+        permission: "projects.create",
+        label: "Create projects",
+        description: "Open new projects inside the workspace.",
+      },
+    ],
+  },
+];
+```
+
+<DocsCallout>
+  The role editor asserts at compile time that every `Permission` appears in exactly one descriptor group — a permission without a description is a bug.
+</DocsCallout>
+
+## 3. Update the default role sets
+
+Decide who gets it out of the box. The three default arrays are in the same file:
+
+```ts
+// Owners always have everything; nothing to add.
+export const DEFAULT_OWNER_PERMISSIONS = ALL_WORKSPACE_PERMISSIONS;
+
+// Admins get it:
+export const DEFAULT_ADMIN_PERMISSIONS: readonly WorkspacePermission[] = [
+  "workspace.settings.edit",
+  "workspace.members.invite",
+  "workspace.members.remove",
+  "workspace.members.change_role",
+  "projects.create",        // ← add
+  // ...
+];
+
+// Members get it too — it's creation of their own projects:
+export const DEFAULT_MEMBER_PERMISSIONS: readonly WorkspacePermission[] = [
+  "projects.create",        // ← add
+  "teams.create",
+];
+```
+
+The seed script uses these when creating workspace roles. Existing rows in prod aren't touched — only newly-seeded workspaces pick up the new default. For existing workspaces, the permission is *available* for manual assignment via the role editor.
+
+<DocsCallout kind="warn">
+  If you want the permission backfilled onto existing roles, write a one-shot migration that inserts `WorkspaceRolePermission` rows for every role matching a `systemKey`. Don't rerun the seed — it's idempotent and won't touch existing roles.
+</DocsCallout>
+
+## 4. Guard the route
+
+In the controller for the new capability, call `requirePermission` on the resolved member:
+
+**apps/api/src/interfaces/http/controllers/projects.controller.ts**
+
+```ts
+.post("/", async (c) => {
+  const { userId } = requireSession(c);
+  const { me, workspace } = await resolveWorkspaceMember(c, userId);
+  requirePermission(me, "projects.create");     // ← here
+
+  const body = CreateBody.parse(await c.req.json());
+  // ...
+})
+```
+
+Failure throws `ForbiddenError("permission.denied")` → 403 with a stable error code.
+
+### Team-scoped permissions
+
+For `team.*` permissions, use `requireTeamPermission` instead. Same shape, but it also requires the team id:
+
+```ts
+const teamId = zPrefixedId("team").parse(c.req.param("teamId"));
+await requireTeamPermission(c, me, workspace, teamId, "team.settings.edit");
+```
+
+## 5. Gate the UI
+
+On the web side, use `useCan` for workspace permissions or `useCanTeam` for team ones:
+
+```tsx
+import { useCan } from "~/lib/pbac/use-can";
+
+export function CreateProjectButton() {
+  const canCreate = useCan("projects.create");
+  return (
+    <Button disabled={!canCreate} onClick={openDialog}>
+      New project
+    </Button>
+  );
+}
+```
+
+<DocsCallout kind="warn">
+  Client-side gating is UX polish, never a security boundary. The API enforces the same permission on every request; the hook just saves a round-trip to a 403.
+</DocsCallout>
+
+## 6. Run typecheck
+
+```bash
+npm run typecheck
+```
+
+Three spots will complain if you missed one:
+
+- `ALL_WORKSPACE_PERMISSIONS` has the wrong length.
+- A `PERMISSION_GROUPS` entry is missing a descriptor.
+- `defaultPermissionsFor(key)` returns arrays that don't cover the new permission where it should.
+
+Fix the complaints, run `npm run test --workspace @orbit/api` to make sure the permission guards still behave, and you're done.

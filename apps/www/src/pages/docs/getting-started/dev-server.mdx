@@ -1,0 +1,109 @@
+---
+title: "npm run dev — what's happening?"
+description: Four processes, three ports, one Turbo pipeline.
+kicker: 01 · Getting started
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+```bash
+npm run dev
+```
+
+The root `dev` script is a one-line alias for `turbo run dev`. Turbo finds every workspace that defines a `dev` task and runs them in parallel. Here's what comes up:
+
+<DocsTable
+  columns={["Workspace", "Port", "Command", "What it is"]}
+  rows={[
+    [
+      <code>@orbit/api</code>,
+      "4002",
+      <code>tsx watch src/index.ts</code>,
+      "Hono REST + WebSocket server.",
+    ],
+    [
+      <code>@orbit/web-tanstack</code>,
+      "4001",
+      <code>vite --port 4001</code>,
+      "Authenticated app (TanStack Start + React 19).",
+    ],
+    [
+      <code>@orbit/web-next</code>,
+      "4003",
+      <code>next dev --turbopack --port 4003</code>,
+      "Authenticated app (Next 16 + React 19).",
+    ],
+    [
+      <code>@orbit/www</code>,
+      "4000",
+      <code>vite dev --port 4000</code>,
+      "Marketing site — this page.",
+    ],
+    [
+      <code>@orbit/webhook-tunnel</code>,
+      "—",
+      "Node forwarder",
+      "Only runs if SMEE_URL is set. Forwards smee.io POSTs to the local API.",
+    ],
+  ]}
+/>
+
+<DocsCallout>
+  You almost never need all four apps running at once. Use the per-workspace shortcuts below to trim what comes up.
+</DocsCallout>
+
+## Running a subset
+
+The root `package.json` ships these filtered shortcuts:
+
+- `npm run dev:api` — API only (port 4002).
+- `npm run dev:web` — whichever web shell the CLI kept (the create-orb scaffold repoints this to the surviving app).
+- `npm run dev:web-tanstack` — the TanStack shell.
+- `npm run dev:web-next` — the Next shell.
+- `npm run dev:www` — the marketing site only.
+
+## What starts in what order
+
+Turbo runs every `dev` task in parallel — there's no declared dependency between them. In practice the API is usually ready a second or two after the web shells, which is fine: React Query retries failed requests, and the TanStack shell waits on the first session fetch before rendering.
+
+If you want a hard boot order (e.g. in CI or a container health check), use the per-workspace scripts and chain them yourself.
+
+## What you're actually getting
+
+### The API (:4002)
+
+- Hono HTTP server under `tsx watch`, hot-reloading on every TS save.
+- WebSocket server on `/v1/ws` — see *Realtime & presence* under Concepts.
+- If `JOBS_PROVIDER=graphile`, a co-located graphile-worker loop starts alongside the HTTP server.
+- If billing is on, Stripe / Polar / Dodo webhook routes wait at `/v1/billing/webhooks/<provider>`.
+
+### The web shells (:4001 or :4003)
+
+You'll have exactly one of these after scaffolding — the CLI strips whichever app you didn't pick. Both shells point at the API via `VITE_API_URL` (or its Next-equivalent) at build time. To run both against one API, set `ADDITIONAL_WEB_ORIGINS=http://localhost:4003` in `apps/api/.env` so the CORS allowlist and better-auth cookie policy both trust them.
+
+### The marketing site (:4000)
+
+TanStack Start too, but unauthenticated and short. "Get access" links over to the web shell's request-access page using `VITE_WEB_URL`.
+
+### The webhook tunnel
+
+Only runs when `SMEE_URL` is set. Covered in detail in *apps/webhook-tunnel/README.md*. Short version:
+
+1. Visit `https://smee.io/new`, copy the URL.
+2. Paste it as `SMEE_URL` in `apps/api/.env`.
+3. Register that same smee URL as your provider's webhook endpoint.
+4. `npm run dev` — the tunnel relays every POST to `http://localhost:4002${SMEE_TARGET_PATH}`.
+
+## Logs and noise
+
+Turbo prefixes every line with the workspace name in a unique color, so interleaved logs stay readable:
+
+```bash
+@orbit/api:dev:   listening on http://localhost:4002
+@orbit/web-tanstack:dev:  VITE ready in 312 ms
+@orbit/www:dev:   ➜  Local:   http://localhost:4000/
+```
+
+## Stopping cleanly
+
+A single `^C` in the terminal where `npm run dev` is running sends SIGINT to every child process — Turbo propagates it, tsx cleans up watchers, Vite shuts its HMR socket. If ports stay bound after a crash, it's usually a stray `tsx` or `node` — kill by port and retry.

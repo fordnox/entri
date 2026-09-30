@@ -1,0 +1,116 @@
+---
+title: "ORM: Drizzle"
+description: One repository port per aggregate. A hand-maintained Drizzle schema behind it. Domain code never imports the ORM.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Orbit's data layer is **Drizzle** on PostgreSQL. It sits behind the repository interfaces in each context's `domain/` folder, so the application and domain layers never import the ORM — they only see ports like `tx.users` and `tx.workspaces`. Everything Drizzle-specific lives in `infrastructure/`.
+
+<DocsCallout kind="note">
+  <strong>One schema file, no generator.</strong> The schema is hand-maintained at <code>apps/api/src/db/drizzle/schema.ts</code> and is the single source of truth. Types are inferred from it at compile time — there is no client to regenerate between a schema edit and a typecheck.
+</DocsCallout>
+
+## Where things live
+
+<DocsTable
+  columns={["Path", "What it is"]}
+  rows={[
+    [<code>apps/api/src/db/drizzle/schema.ts</code>, "Every table, index, and relation. Edit this to change the database."],
+    [<code>apps/api/drizzle/drizzle.config.ts</code>, "drizzle-kit config — schema path, migrations folder, connection string."],
+    [<code>apps/api/drizzle/migrations/</code>, "Generated SQL migrations, applied in order."],
+    [<code>apps/api/src/infrastructure/drizzle.ts</code>, "The Drizzle client and connection pool."],
+    [<code>apps/api/src/infrastructure/drizzle-uow.ts</code>, <><code>DrizzleUnitOfWork</code> — transaction management + repository wiring.</>],
+    [<code>apps/api/src/**/infrastructure/drizzle-*.repository.ts</code>, "One repository implementation per port, per bounded context."],
+  ]}
+/>
+
+## Commands
+
+<DocsTable
+  columns={["Task", "Command"]}
+  rows={[
+    [
+      "Create a migration from schema edits",
+      <code>npm run drizzle:generate</code>,
+    ],
+    [
+      "Apply pending migrations",
+      <code>npm run drizzle:migrate</code>,
+    ],
+    [
+      "Push the schema straight to a dev database (no migration file)",
+      <code>npm run drizzle:push</code>,
+    ],
+    [
+      "Inspect in a GUI",
+      <code>npm run drizzle:studio</code>,
+    ],
+    [
+      "Apply migrations in production",
+      <>
+        <code>npx drizzle-kit migrate --config=drizzle/drizzle.config.ts</code> from <code>apps/api</code>
+      </>,
+    ],
+  ]}
+/>
+
+Every root-level `drizzle:*` script proxies to the same command inside `apps/api`, which reads `apps/api/drizzle/drizzle.config.ts`. The Dockerfile's `migrate` stage and Railway's `preDeployCommand` run the production form.
+
+<DocsCallout kind="warn">
+  <code>drizzle:push</code> is a dev shortcut. It diffs the schema against the live database and applies the change without writing a migration file, so there's nothing for other environments to replay. Use <code>drizzle:generate</code> + <code>drizzle:migrate</code> for anything you intend to commit.
+</DocsCallout>
+
+## Domain code never sees the ORM
+
+Services and aggregates only talk to repository ports through the Unit of Work:
+
+```ts
+await uow.run(async (tx) => {
+  const user = await tx.users.findById(userId);
+  if (!user) throw new Error("not found");
+  user.rename("New name");
+  await tx.users.save(user);
+});
+```
+
+- `TxContext` exposes the repository ports (`users`, `workspaces`, …), each backed by a `Drizzle*Repository` bound to the current transaction.
+- Domain events, projectors, and the `UnitOfWork` semantics live on `BaseUnitOfWork` — `DrizzleUnitOfWork` only supplies transaction management and repository wiring.
+- better-auth uses `@better-auth/drizzle-adapter` against the same schema, wired in `interfaces/http/better-auth.ts`.
+
+## ID generation
+
+Drizzle doesn't auto-fill ids, so repositories and aggregates call `newId("user")` (etc.) explicitly before `db.insert(...)`. Every row gets a typed, prefixed UUIDv7 id, and the mechanism is visible in the code rather than hidden in a client hook.
+
+## Under the hood
+
+**apps/api/src/kernel/base-uow.ts — the shared base**
+
+```ts
+export abstract class BaseUnitOfWork<TxHandle> implements UnitOfWork {
+  constructor(protected readonly bus: EventBus) {}
+
+  protected abstract openTransaction<T>(fn: (h: TxHandle) => Promise<T>): Promise<T>;
+  protected abstract buildContext(handle: TxHandle): RepoContext;
+  protected abstract readHandle(): TxHandle;
+
+  async run<T>(fn: (tx: TxContext) => Promise<T>): Promise<T> { /* shared */ }
+  async read<T>(fn: (tx: TxContext) => Promise<T>): Promise<T> { /* shared */ }
+}
+```
+
+`DrizzleUnitOfWork` extends this class and supplies three small methods: how to open a transaction, how to build a repository context from a transactional handle, and how to return a non-transactional handle for reads. Event collection, read-only guards, and post-commit dispatch are inherited.
+
+## Adding a table
+
+1. Add the `pgTable(...)` definition to `apps/api/src/db/drizzle/schema.ts`.
+2. Run `npm run drizzle:generate` — a new SQL file lands in `apps/api/drizzle/migrations/`.
+3. Run `npm run drizzle:migrate` to apply it locally.
+4. Write the `drizzle-*.repository.ts` implementation and register it in `DrizzleUnitOfWork.buildContext()`.
+
+The *Add a bounded context* guide walks through this end-to-end.
+
+<DocsCallout kind="note">
+  <strong>Tests don't care about the ORM.</strong> The service suite in <code>apps/api/src/**/*.test.ts</code> runs against in-memory repositories through <code>UnitOfWork</code>. Integration tests spin up a real Postgres with Testcontainers and exercise the Drizzle repositories directly.
+</DocsCallout>

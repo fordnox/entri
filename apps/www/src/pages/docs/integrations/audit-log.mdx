@@ -1,0 +1,126 @@
+---
+title: SaaS audit log (workspace + admin scope)
+description: Append-only ledger at two scopes — tenant and app-wide. Entries are projected from the domain event bus so services never write audit rows directly.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Orbit ships a first-class audit log bounded context in `apps/api/src/audit/`. It exposes two entry types that share one interface — a tenant-scoped log read by workspace admins, and an app-wide log read by platform admins. Entries are materialised by a post-commit projector subscribed to the domain event bus, so services do not touch audit rows and cannot forget to log.
+
+<DocsCallout kind="note">
+  <strong>Paid feature.</strong> The audit log ships with the paid track. Scaffold with <code>--audit-log=yes</code> (the default when any paid feature is on) to keep it, or <code>--audit-log=no</code> to strip the bounded context, its repositories, the two Drizzle tables, and the <code>workspace.audit_log.*</code> / <code>team.audit_log.view</code> permissions.
+</DocsCallout>
+
+## Two scopes, one shape
+
+<DocsTable
+  columns={["Entry", "Scope", "Who reads it"]}
+  rows={[
+    [
+      <code>AppAuditEntry</code>,
+      "App-wide",
+      <>
+        Platform admins (<code>user.role === "admin"</code>). Moderation-class events: bans, impersonations, cross-tenant admin operations.
+      </>,
+    ],
+    [
+      <code>WorkspaceAuditEntry</code>,
+      "Per workspace (optionally narrowed by team)",
+      <>
+        Members with <code>workspace.audit_log.view</code>, or <code>team.audit_log.view</code> when <code>teamId</code> is set. Lifecycle of the workspace's own aggregates — members, roles, teams, billing.
+      </>,
+    ],
+  ]}
+/>
+
+Both entry types extend one `AuditEntry` interface in `audit/domain/audit-entry.ts`, so filters, pagination, and cursors behave identically across the two.
+
+## How entries get written
+
+The audit log is a **projection**, not a side effect services opt into. When a domain event is dispatched after a successful commit, the projector in `audit/application/audit-projector.ts` maps it to an audit row via `audit-event-mapper.ts` and writes through the matching repository. Services stay free of audit concerns.
+
+**a service changes state — nothing audit-shaped in sight**
+
+```ts
+await uow.run(async (tx) => {
+  const workspace = await tx.workspaces.findById(workspaceId);
+  workspace.rename("Acme Rocket Division");
+  await tx.workspaces.save(workspace);
+  tx.events.add(new WorkspaceRenamed(workspaceId, actor));
+});
+```
+
+The `WorkspaceRenamed` event is queued on the Unit of Work, dispatched post-commit, and translated by the projector into a `WorkspaceAuditEntry` row with `action = "workspace.renamed"` and the relevant target + metadata.
+
+<DocsCallout kind="note">
+  <strong>Post-commit only.</strong> The projector runs after the transaction commits, not inside it. A rolled-back transaction produces no audit entry — by design. Audit rows never disagree with business state.
+</DocsCallout>
+
+## Metadata sanitisation
+
+Domain events carry whatever payload the aggregate needs. Before an entry is persisted, payloads pass through `audit/application/sanitize-metadata.ts`, which strips known PII-flavoured keys (tokens, secrets, raw credentials) and truncates oversized blobs. Unit-tested in `sanitize-metadata.test.ts`.
+
+## Permissions
+
+<DocsTable
+  columns={["Permission", "Scope", "Grants"]}
+  rows={[
+    [
+      <code>workspace.audit_log.view</code>,
+      "Workspace",
+      "Read the workspace's audit stream with filters and pagination.",
+    ],
+    [
+      <code>workspace.audit_log.export</code>,
+      "Workspace",
+      "Export audit entries (CSV/JSON) for compliance review.",
+    ],
+    [
+      <code>team.audit_log.view</code>,
+      "Team (requires the teams feature)",
+      <>
+        Read workspace entries narrowed by <code>teamId</code>. Granted to team admins by default.
+      </>,
+    ],
+  ]}
+/>
+
+Declared once in `packages/shared/src/permissions.ts`, guarded server-side by `requirePermission(...)` and `requireTeamPermission(...)`, and surfaced on the client via `useCan()` / `useCanTeam()`.
+
+## Query surface
+
+Two application services are registered in the composition root: `ListAppAuditService` and `ListWorkspaceAuditService`. Both accept the same `AuditFilter` shape and return a forward-only cursor page.
+
+**AuditFilter (audit/domain/audit-entry.ts)**
+
+```ts
+export interface AuditFilter {
+  actorUserId?: UserId;
+  action?: string | readonly string[];
+  from?: Date;
+  to?: Date;
+  cursor?: string; // opaque, forward-only
+  limit?: number;  // clamped by the repository
+}
+```
+
+### Storage
+
+- Two tables, `app_audit_entries` and `workspace_audit_entries`, with composite indexes on `(scope_id, occurred_at)` plus per-action and per-actor indexes for common queries.
+- One Drizzle repository per table, behind the same repository ports as every other context — services never touch audit rows directly.
+- Pagination uses an opaque cursor built from `(occurredAt, id)` — see `audit/infrastructure/cursor.ts`.
+
+## Turning it off
+
+Passing `--audit-log=no` at scaffold time removes:
+
+- The entire `apps/api/src/audit/` bounded context.
+- The `app_audit_entries` and `workspace_audit_entries` tables in the Drizzle schema.
+- The `appAudit` and `workspaceAudit` repositories on the Unit of Work, plus the projector wiring in `composition.ts`.
+- The `workspace.audit_log.view`, `workspace.audit_log.export`, and `team.audit_log.view` permissions, including the system-role seeds that grant them.
+- The integration test suite at `apps/api/src/__tests__/audit.integration.test.ts`.
+
+<DocsCallout kind="note">
+  <strong>Domain events keep firing.</strong> Stripping the audit log does not remove any events from the domain layer — it just removes the projector that was listening. Other projectors (realtime, mailer, billing reconciliation) are untouched.
+</DocsCallout>

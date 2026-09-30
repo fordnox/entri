@@ -1,0 +1,148 @@
+---
+title: Deploy the web shells
+description: SSR Node server for TanStack Start. Node or edge for Next. Two env vars, baked at build.
+kicker: 06 · Deploy
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+The web shells are SSR Node servers — not static sites. They authenticate server-side (reading the better-auth session cookie), redirect unauthenticated users, and stream the dashboard shell. Both TanStack Start and Next 16 produce a Node output you deploy like any other long-running service; the marketing site (`@orbit/www`) is the same shape.
+
+## Build-time vs runtime env
+
+<DocsCallout kind="warn">
+
+The web shells have **build-time** env vars — Vite and Next both inline `import.meta.env.VITE_*` / `process.env.NEXT_PUBLIC_*` into the client bundle. If your API URL changes, you rebuild, not restart.
+
+</DocsCallout>
+
+<DocsTable
+  columns={["Var", "When", "What it does"]}
+  rows={[
+    [
+      <code>VITE_API_URL</code>,
+      "build",
+      "Base URL for REST + WebSocket. Baked into the client bundle.",
+    ],
+    [
+      <code>VITE_WEB_URL</code>,
+      "build",
+      "Canonical app URL — used in email links, share URLs.",
+    ],
+    [
+      <code>VITE_WWW_URL</code>,
+      "build",
+      "Marketing site URL — used by the web shell's public footer.",
+    ],
+    [
+      <code>HOST</code>,
+      "runtime",
+      "0.0.0.0 in containers. Defaults to localhost.",
+    ],
+    [
+      <code>PORT</code>,
+      "runtime",
+      "Whatever your host expects. Dev defaults are 4001 (web-tanstack), 4003 (web-next), and 4000 (www); in production set this to whatever port your platform routes traffic to.",
+    ],
+  ]}
+/>
+
+## TanStack Start (`@orbit/web-tanstack`)
+
+### Build output
+
+Vite + Nitro produce a `.output` folder with a self-contained Node server:
+
+```
+npm run build --workspace=@orbit/web-tanstack
+# → apps/web-tanstack/.output/server/index.mjs
+
+# serve it
+node apps/web-tanstack/.output/server/index.mjs
+```
+
+### Dockerfile
+
+`apps/web-tanstack/Dockerfile` mirrors the API's shape: pruner → deps → builder → runtime. The runtime stage only carries `.output/` plus prod `node_modules`. Entry point is `node ./server/index.mjs`.
+
+### Railway
+
+`apps/web-tanstack/railway.toml` is wired for a standalone service:
+
+```
+[build]
+watchPatterns = [
+  "package.json", "package-lock.json", "turbo.json",
+  "apps/web-tanstack/**", "packages/shared/**", "packages/ui/**",
+]
+buildCommand = "npm ci && npx turbo run build --filter=@orbit/web-tanstack"
+
+[deploy]
+startCommand = "npm run start --workspace=@orbit/web-tanstack"
+```
+
+Set `VITE_API_URL` and `VITE_WWW_URL` as build-time variables in the Railway service. Runtime env needs only `HOST=0.0.0.0`; `PORT` is provided by Railway.
+
+### Vercel / Cloudflare / Fly
+
+- **Vercel** — install the TanStack Start framework preset (or deploy as a Node project). Root directory: `apps/web-tanstack`. Build command: `npm run build --workspace=@orbit/web-tanstack`.
+- **Cloudflare Pages / Workers** — Nitro has Workers presets. Use `nitro.preset=cloudflare-pages` in the config; you lose Node-only APIs but gain global distribution.
+- **Fly** — `fly launch --no-deploy`, point at `apps/web-tanstack/Dockerfile`, expose port 4001. Since the bundle is self-contained, single-region is fine.
+
+## Next 16 (`@orbit/web-next`)
+
+If you scaffolded with `--framework=next`, the surviving web shell is the Next 16 App Router. Its build output is standard:
+
+```
+npm run build --workspace=@orbit/web-next
+# → apps/web-next/.next/
+
+# serve it
+npm run start --workspace=@orbit/web-next
+```
+
+Vercel is the easiest path — import the repo with `apps/web-next` as the root directory and it's one click. For anywhere else, Next's standalone output (`output: "standalone"`) produces a minimal server you can ship in any Node container.
+
+<DocsCallout>
+
+Public env vars for Next use the `NEXT_PUBLIC_*` prefix, not `VITE_*`. The CLI sets these correctly when it scaffolds Next.
+
+</DocsCallout>
+
+## Marketing site (`@orbit/www`)
+
+Same shape as web-tanstack — TanStack Start + Nitro + Node output. Needs exactly one build-time var: `VITE_WEB_URL` (the URL of the authenticated app, so "Sign in" and "Get access" point at the right place).
+
+**apps/www/railway.toml**
+
+```
+[build]
+buildCommand = "npm ci && npx turbo run build --filter=@orbit/www"
+
+[deploy]
+startCommand = "npm run start --workspace=@orbit/www"
+```
+
+## CORS & cookies — the cross-origin case
+
+In prod you usually put the API and app on the same apex — `app.example.com` + `api.example.com`. For the session cookie to flow, the API needs the app's origin in its allowlist:
+
+**apps/api/.env (prod)**
+
+```
+API_ORIGIN="https://api.example.com"
+WEB_ORIGIN="https://app.example.com"
+WWW_ORIGIN="https://example.com"
+# If you run both web shells against one API:
+# ADDITIONAL_WEB_ORIGINS="https://next.example.com"
+```
+
+<DocsCallout kind="warn">
+  Two different root domains (not just subdomains) means cross-site cookies — you'll hit SameSite issues. Keep the API and app under a shared apex when you can; reverse-proxy the API under the app's domain if you can't.
+</DocsCallout>
+
+## What not to forget
+
+- Rebuild the web shells after changing any `VITE_*` or `NEXT_PUBLIC_*` var — the old value is in the bundle.
+- Update OAuth redirect URIs to the prod `API_ORIGIN` (covered on the *OAuth providers* page).
+- If you're using a CDN in front of the API, configure it to *not* buffer WebSocket upgrades — or route `/v1/ws` to a WS-capable path.

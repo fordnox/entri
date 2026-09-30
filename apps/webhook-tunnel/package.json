@@ -1,0 +1,12 @@
+{
+  "name": "@orbit/webhook-tunnel",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node ./forward.mjs"
+  },
+  "dependencies": {
+    "smee-client": "^2.0.4"
+  }
+}

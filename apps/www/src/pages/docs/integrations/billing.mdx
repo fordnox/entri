@@ -1,0 +1,166 @@
+---
+title: SaaS billing — Stripe, Polar & Dodo
+description: One BillingProvider port, three interchangeable adapters — Stripe, Polar, and Dodo Payments. The master switch is a single env var.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Billing follows the adapter pattern that runs through every external dependency in Orbit: a **port** lives in `application/`, concrete adapters live in `infrastructure/`, and `composition.ts` picks one based on env. Swap the provider by changing `BILLING_PROVIDER` and the associated secrets — zero code changes, zero domain changes.
+
+## The port
+
+**apps/api/src/billing/application/billing-provider.ts**
+
+```ts
+export interface BillingProvider {
+  listPlans(): Promise<BillingPlan[]>;
+  findCustomer(providerCustomerId: string): Promise<ProviderCustomer | null>;
+  createCustomer(input: CreateCustomerInput): Promise<ProviderCustomer>;
+  startCheckout(input: StartCheckoutInput): Promise<{ redirectUrl: string; sessionId: string }>;
+  openPortal(input: OpenPortalInput): Promise<{ redirectUrl: string }>;
+  cancelSubscription(input: CancelInput): Promise<void>;
+  fetchSubscription(providerSubscriptionId: string): Promise<ProviderSubscription | null>;
+}
+```
+
+All seven methods are provider-agnostic. The domain layer never sees Stripe's `checkout.sessions`, Polar's product model, or Dodo's snake_case fields — adapters translate at the boundary.
+
+## The three adapters
+
+<DocsTable
+  columns={["Provider", "SDK", "Pricing model", "Webhook verification"]}
+  rows={[
+    [
+      <code>stripe</code>,
+      <code>stripe</code>,
+      <>
+        <code>priceId</code> (you're the merchant of record)
+      </>,
+      <>
+        <code>webhooks.constructEvent</code> (STRIPE_WEBHOOK_SECRET)
+      </>,
+    ],
+    [
+      <code>polar</code>,
+      <code>@polar-sh/sdk</code>,
+      <>
+        <code>productId</code> (Polar is the MoR)
+      </>,
+      <>
+        Standard Webhooks (<code>validateEvent</code>)
+      </>,
+    ],
+    [
+      <code>dodo</code>,
+      <code>dodopayments</code>,
+      "Product-based, Dodo is the MoR",
+      <>
+        Standard Webhooks (<code>webhooks.unwrap</code>)
+      </>,
+    ],
+  ]}
+/>
+
+### StripeBillingProvider
+
+**apps/api/src/billing/infrastructure/stripe-billing-provider.ts**
+
+```ts
+constructor(config, listPlans) {
+  this.client = new Stripe(config.apiKey, { apiVersion: config.apiVersion });
+}
+
+startCheckout(input) {
+  return this.client.checkout.sessions.create({
+    customer: input.providerCustomerId,
+    mode: "subscription",
+    line_items: [{ price: plan.priceId, quantity: 1 }],
+    success_url: input.successUrl,
+    cancel_url: input.cancelUrl,
+  });
+}
+```
+
+### PolarBillingProvider
+
+Polar uses `productId` instead of `priceId`, and `externalId` for your-side customer mapping. The `POLAR_SERVER` env var switches between `"sandbox"` and `"production"` targets.
+
+### DodoBillingProvider
+
+Dodo's SDK is Stainless-generated. The adapter translates snake_case response fields (`customer_id`, `checkout_url`) into the camelCase domain types. `DODO_PAYMENTS_ENVIRONMENT` toggles `"test_mode"` vs `"live_mode"`.
+
+## How the adapter is selected
+
+**apps/api/src/billing/feature.ts**
+
+```ts
+function buildProvider(config, catalog): BillingProvider {
+  if (config.provider === "stripe" && config.stripe) {
+    return new StripeBillingProvider(
+      { apiKey: config.stripe.apiKey },
+      () => catalog.list(),
+    );
+  }
+  if (config.provider === "polar" && config.polar) {
+    return new PolarBillingProvider(
+      { accessToken: config.polar.accessToken, server: config.polar.server },
+      () => catalog.list(),
+    );
+  }
+  if (config.provider === "dodo" && config.dodo) {
+    return new DodoBillingProvider(
+      { apiKey: config.dodo.apiKey, environment: config.dodo.environment },
+      () => catalog.list(),
+    );
+  }
+  return new NoopBillingProvider();
+}
+```
+
+<DocsCallout>
+  When <code>BILLING_PROVIDER</code> is unset, the feature resolves to <code>NoopBillingProvider</code>. The billing routes still mount, but they return a stable disabled-state response — no SDK is constructed, no secrets are read.
+</DocsCallout>
+
+## The webhook flow
+
+Every provider calls the same route pattern:
+
+```
+POST /v1/billing/webhooks/:provider
+```
+
+Four things happen inside the handler, in order:
+
+1. **Raw-body preservation.** The controller reads `c.req.text()`, not `.json()`, and forwards lowercased headers — signature verification needs the exact bytes.
+2. **Signature verification.** Each provider has a `WebhookReceiver` adapter that uses the SDK's native verifier: `StripeWebhookReceiver`, `PolarWebhookReceiver`, `DodoWebhookReceiver`. Failure throws `InvalidWebhookSignatureError` → 400.
+3. **Dedupe.** `HandleBillingWebhookService` records every event in a `BillingEvent` ledger row, keyed by `providerEventId`. Replays short-circuit with `{ ok: true, processed: false }`.
+4. **Apply.** The service resolves the workspace via `BillingCustomer`, then upserts the `Subscription` aggregate. Domain events fire post-commit — the realtime publisher broadcasts `subscription.updated` to every socket on the workspace channel.
+
+<DocsCallout kind="warn">
+  The signature verification step is non-negotiable. Without the raw body preserved exactly as sent, HMAC comparison fails and legitimate webhooks get rejected. Hono's default JSON parser would mutate the bytes — the controller deliberately reads text instead.
+</DocsCallout>
+
+## The plan catalog
+
+`BILLING_PLANS_JSON` is the source of truth for which plans render on the billing settings page. It's read at boot into a `BillingCatalog` and handed to the provider via `listPlans()`. Keep it small; when you outgrow a handful of plans, replace the env-backed source in `composition.ts` with a DB-backed provider.
+
+For Polar and Dodo, `priceId` holds the provider's product id — the adapter translates the naming, you don't have to.
+
+## Swapping providers
+
+1. Set `BILLING_PROVIDER` to the new value.
+2. Replace the provider-specific secrets (see *Environment variables*).
+3. Update `BILLING_PLANS_JSON` — `priceId` values change per provider.
+4. Register a new webhook endpoint with the provider, pointing at `/v1/billing/webhooks/<name>`.
+5. Restart the API. Existing `BillingCustomer` rows are scoped to the previous provider — you'll want to nullify them or re-provision customers on the new side.
+
+## Adding a fourth provider
+
+It's a file, not a refactor:
+
+1. Implement `BillingProvider` and `BillingWebhookReceiver` in `billing/infrastructure/<name>-billing-provider.ts`.
+2. Extend `readBillingConfig()` in `composition.ts` to recognize the new name and parse its secrets.
+3. Add the `new_provider === "..."` branch to `buildProvider()` in `billing/feature.ts`.
+
+No changes to the domain layer, no changes to `HandleBillingWebhookService`, no changes to the HTTP controller. The port shape is the contract — the domain doesn't care what speaks it.

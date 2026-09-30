@@ -1,0 +1,218 @@
+---
+title: Uploads (UploadThing / S3)
+description: A thin FileStorage port, a single catch-all route, and a disabled state that doesn't 500. Pick UploadThing, an S3-compatible bucket such as Cloudflare R2, or none.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+Uploads are optional. `UPLOADS_PROVIDER` picks one of three adapters behind a single `FileStorage` port; when nothing is configured the feature is disabled at boot and the upload routes return a stable 501 the web client can render as a disabled-state.
+
+## Adapters
+
+| `UPLOADS_PROVIDER` | Behaviour |
+|---|---|
+| `uploadthing` | Hosted. The browser uploads straight to UploadThing's CDN through its typed router; server-side writes use a private ACL and are read through signed URLs. Needs `UPLOADTHING_TOKEN`. |
+| `s3` | Any S3-compatible bucket: Cloudflare R2, AWS S3, MinIO, Backblaze B2. The browser POSTs multipart to the API, which streams the object into the bucket; objects stay private and are read through presigned URLs minted by the API. Needs `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` and, for anything but AWS, `S3_ENDPOINT`. `r2` is accepted as an alias. See [Cloudflare R2](#cloudflare-r2) below. |
+| `noop` | Storage disabled. The upload route answers 501 with `uploads.not_configured`; server-side `put` / `read` / `signedReadUrl` throw the same code. |
+| unset | `uploadthing` if a token is present, `s3` if the bucket keys are present, otherwise `noop`. |
+
+## The port
+
+**apps/api/src/uploads/application/file-storage.ts**
+
+```ts
+export interface FileStoragePolicy {
+  readonly allowedMimeTypes: readonly string[];
+  readonly maxFileSizeBytes: number;
+  readonly maxFilesPerUpload: number;
+}
+
+export type FileStorageRouteHandler = (request: Request) => Promise<Response>;
+
+export interface FileStorage {
+  readonly provider: string;
+  readonly policy: FileStoragePolicy;
+  readonly canStore: boolean;
+  routeHandler(): FileStorageRouteHandler;
+  put(input: PutObjectInput): Promise<StoredObject>;
+  read(storageKey: string): Promise<ReadObjectResult>;
+  signedReadUrl(storageKey: string, opts: { expiresInSeconds: number }): Promise<string>;
+  delete(storageKey: string): Promise<void>;
+}
+```
+
+Two paths live on the port. `routeHandler()` is the browser-facing upload route the API mounts blindly under `/v1/uploads`. `put` / `read` / `signedReadUrl` are the server-side path for anything your own services store: the API receives the bytes, validates them against the policy, stores them privately, and mints a short-lived read URL only after it has checked the caller's authorization. `delete` is best-effort garbage collection. The app persists **storage keys**, never URLs.
+
+## The default policy
+
+**apps/api/src/uploads/feature.ts**
+
+```ts
+policy: {
+  allowedMimeTypes: ["image/png", "image/jpeg", "image/gif", "image/webp"],
+  maxFileSizeBytes: 16 * 1024 * 1024,
+  maxFilesPerUpload: 1,
+}
+```
+
+16 MiB, PNG/JPEG/GIF/WebP, one file per request. Tuned for avatars and inline images. When you need video or wider file-type support, change the policy here — the UploadThing router, the S3 route, and the server-side `put` are all driven by the same values.
+
+## Cloudflare R2
+
+1. In the Cloudflare dashboard create an R2 bucket. Leave public access off; the API signs every read itself.
+2. Under R2 → *Manage API tokens* create a token with **Object Read & Write** scoped to that bucket. Copy the access key id and secret.
+3. Set the variables. The endpoint uses your account id, shown on the R2 overview page.
+
+```bash
+UPLOADS_PROVIDER="s3"
+S3_ENDPOINT="https://<account-id>.r2.cloudflarestorage.com"
+S3_BUCKET="my-app-uploads"
+S3_ACCESS_KEY_ID="..."
+S3_SECRET_ACCESS_KEY="..."
+# optional
+S3_REGION="auto"          # R2 default; AWS needs the bucket's real region
+S3_KEY_PREFIX="avatars"   # namespace keys inside a shared bucket
+S3_FORCE_PATH_STYLE=false # true for MinIO and most self-hosted gateways
+```
+
+No CORS rules are needed: the browser never talks to the bucket for writes, and presigned reads are plain GET requests for images.
+
+The same variables work for AWS S3 (omit `S3_ENDPOINT`, set `S3_REGION`), MinIO (`S3_ENDPOINT=http://localhost:9000`, `S3_FORCE_PATH_STYLE=true`) and other S3-compatible stores. Presigned URLs are capped at seven days by the signing scheme; the adapter clamps longer TTLs.
+
+### The S3 upload route
+
+With the `s3` adapter, `POST /v1/uploads` accepts `multipart/form-data` with one or more `file` parts. Session, file count, content type and size are checked before any byte reaches the bucket. Keys are generated server-side as `<prefix><shard>/<random>.<ext>` and never derived from the client filename. The response carries one entry per file:
+
+```json
+{
+  "files": [
+    {
+      "uploadedBy": "user_...",
+      "key": "3f2a/3f2a9c...e1.png",
+      "name": "avatar.png",
+      "size": 48213,
+      "type": "image/png",
+      "url": "https://my-app-uploads.<account-id>.r2.cloudflarestorage.com/3f2a/...?X-Amz-Signature=..."
+    }
+  ]
+}
+```
+
+`GET /v1/uploads` answers the active policy so a client can size its picker. Failures use stable codes: `unauthorized`, `uploads.no_file`, `uploads.too_many_files`, `uploads.unsupported_type`, `uploads.file_too_large`, and `uploads.provider_error` when the bucket refuses the write.
+
+## UploadThing
+
+The adapter wraps the UploadThing SDK. At construction it builds a router whose middleware calls an `UploadSessionResolver` — the API's better-auth session — to stamp each upload with a user id:
+
+**apps/api/src/uploads/infrastructure/uploadthing-file-storage.ts**
+
+```ts
+function buildRouter(resolveSession, policy): FileRouter {
+  const f = createUploadthing();
+  const maxFileSize = formatSize(policy.maxFileSizeBytes) as "16MB";
+  return {
+    image: f({ image: { maxFileSize, maxFileCount: policy.maxFilesPerUpload } })
+      .middleware(async ({ req }) => {
+        const userId = await resolveSession(req);
+        if (!userId) throw new UploadThingError({
+          code: "FORBIDDEN",
+          message: "sign in to upload",
+        });
+        return { userId };
+      })
+      .onUploadComplete(async ({ metadata, file }) => ({
+        uploadedBy: metadata.userId,
+        key: file.key,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+      })),
+  };
+}
+```
+
+`onUploadComplete`'s return value lands on the client as the upload's metadata — that's what the web app persists as the user's avatar key. Enable "accept URL overrides" in the UploadThing dashboard so the expiry the API asks for on `signedReadUrl` is honoured.
+
+<DocsCallout kind="warn">
+  With UploadThing the upload itself goes directly to its CDN, not through the API — which is why it stays snappy for big files. Only the metadata callback (<code>onUploadComplete</code>) lands in the API, over an HMAC-signed callback. Don't put anything secret in the upload response.
+</DocsCallout>
+
+## NoopFileStorage (disabled)
+
+```ts
+routeHandler(): FileStorageRouteHandler {
+  return async () =>
+    new Response(
+      JSON.stringify({
+        error: {
+          code: "uploads.not_configured",
+          message: "file uploads are disabled: set UPLOADTHING_TOKEN or the S3_* keys to enable",
+        },
+      }),
+      { status: 501, headers: { "content-type": "application/json" } },
+    );
+}
+```
+
+<DocsCallout>
+  The disabled-state response has a stable error code, not a random 500. The web client checks for <code>uploads.not_configured</code> and hides the upload affordance rather than showing a scary error. Server-side callers can check <code>fileStorage.canStore</code> up front.
+</DocsCallout>
+
+## The HTTP surface
+
+**apps/api/src/interfaces/http/controllers/uploads.controller.ts**
+
+```ts
+uploads.all("/*", async (c) => {
+  const container = c.get("container");
+  const handler = container.fileStorage.routeHandler();
+  return handler(c.req.raw);
+});
+```
+
+The controller is deliberately dumb: *any* method, *any* sub-path under `/v1/uploads`, forward the raw `Request` to the provider's handler. The provider owns the protocol — UploadThing's signing dance or the S3 adapter's multipart POST — and the controller stays identical.
+
+## The client side
+
+With UploadThing, the web app uses its React hooks pointed at `/v1/uploads` via `VITE_API_URL`:
+
+```ts
+import { useUploadThing } from "~/lib/uploads/client";
+
+function AvatarUploader() {
+  const { startUpload, isUploading } = useUploadThing("image", {
+    onClientUploadComplete: ([file]) => {
+      if (!file) return;
+      saveAvatar({ key: file.key });  // call the app API to persist
+    },
+  });
+  // ...
+}
+```
+
+With the S3 adapter there is no provider SDK on the client — a plain `fetch` does it:
+
+```ts
+async function uploadAvatar(file: File) {
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_URL}/v1/uploads`, {
+    method: "POST",
+    body: form,
+    credentials: "include",
+  });
+  const { files } = await res.json();
+  saveAvatar({ key: files[0].key });
+}
+```
+
+Either way the app persists the **key**; read URLs are re-minted by the API on demand.
+
+## Deleting files
+
+`fileStorage.delete(storageKey)` removes the object and returns void. Both adapters treat already-gone files and provider hiccups as success — garbage collection is idempotent and best-effort. Call it from projectors that listen for `AvatarReplaced` or `UserDeleted`.
+
+## Rotating the S3 secret
+
+Issue the new key pair, deploy, then revoke the old one. Stored objects are unaffected. Presigned URLs already handed to browsers were signed with the old secret and stop working the moment it is revoked; clients that refetch get fresh URLs, so the gap is one request.

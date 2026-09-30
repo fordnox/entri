@@ -1,0 +1,101 @@
+---
+title: Production webhook routing
+description: One public URL per provider, signature verification on every call, dedupe in the ledger, nothing else fancy.
+kicker: 06 · Deploy
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Three features in Orbit receive inbound webhooks: billing (Stripe / Polar / Dodo), jobs (QStash, when you use it), and nothing else. All of them follow the same three rules — raw body preserved, signature verified, event deduped — so the production routing story is mostly about picking the right public URL and not breaking those three.
+
+## The endpoints
+
+<DocsTable
+  columns={["Provider", "Endpoint", "When"]}
+  rows={[
+    [
+      "Stripe",
+      <code>POST /v1/billing/webhooks/stripe</code>,
+      <code>BILLING_PROVIDER=stripe</code>,
+    ],
+    [
+      "Polar",
+      <code>POST /v1/billing/webhooks/polar</code>,
+      <code>BILLING_PROVIDER=polar</code>,
+    ],
+    [
+      "Dodo",
+      <code>POST /v1/billing/webhooks/dodo</code>,
+      <code>BILLING_PROVIDER=dodo</code>,
+    ],
+    [
+      "Upstash QStash",
+      <code>POST /v1/jobs/run/:name</code>,
+      <code>JOBS_PROVIDER=qstash</code>,
+    ],
+  ]}
+/>
+
+All four are public, unauthenticated, signature-verified. Don't put them behind basic auth or IP allowlists — you'll block legitimate deliveries.
+
+## What to register with each provider
+
+### Stripe
+
+1. Stripe Dashboard → Developers → Webhooks → Add endpoint.
+2. URL: `https://api.example.com/v1/billing/webhooks/stripe`.
+3. Events to listen for (minimum): `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`.
+4. Copy the signing secret into `STRIPE_WEBHOOK_SECRET`.
+
+### Polar
+
+1. Polar dashboard → Settings → Webhooks → Add endpoint.
+2. URL: `https://api.example.com/v1/billing/webhooks/polar`.
+3. Events: `subscription.created`, `subscription.updated`, `subscription.canceled`.
+4. Copy the secret into `POLAR_WEBHOOK_SECRET`.
+
+### Dodo
+
+1. Dodo dashboard → Webhooks → Add.
+2. URL: `https://api.example.com/v1/billing/webhooks/dodo`.
+3. Events: subscription lifecycle + payment.
+4. Copy the signing key into `DODO_PAYMENTS_WEBHOOK_KEY`.
+
+### QStash
+
+QStash is different — you don't register anything; the `QSTASH_CALLBACK_URL` env var *is* the registration, and each `enqueue()` tells QStash where to deliver. In prod, point it at your public API:
+
+```
+QSTASH_CALLBACK_URL="https://api.example.com"
+```
+
+QStash will POST to `${QSTASH_CALLBACK_URL}/v1/jobs/run/<name>` with a signature header. Both current and next signing keys are checked — rotate them in the Upstash console without downtime.
+
+## Signature verification (what the API does for you)
+
+The webhook controller reads the raw body as *text* (not JSON) and forwards it to the provider-specific receiver. Each receiver uses the SDK's native verifier, so you inherit every correctness property the provider's SDK has:
+
+- **Stripe** — `stripe.webhooks.constructEvent(rawBody, signature, secret)`.
+- **Polar** — Standard Webhooks spec, verified via `validateEvent` with `webhook-id`, `webhook-timestamp`, and `webhook-signature` headers.
+- **Dodo** — Standard Webhooks spec via `client.webhooks.unwrap`.
+- **QStash** — `Receiver.verify()` against current + next keys.
+
+<DocsCallout kind="warn">
+  Don't insert any middleware between the ingress and the controller that parses JSON or mutates headers — the raw body must arrive byte-identical to what the provider signed. Cloudflare, Fastly, and some API gateways modify bodies by default; turn those transforms off for webhook paths.
+</DocsCallout>
+
+## Dedupe
+
+Providers retry aggressively — on any 5xx, timeout, or non-2xx response. Orbit dedupes via the `BillingEvent` ledger: every verified webhook writes a row keyed by `providerEventId` before the domain update runs. A replay finds the existing row and short-circuits with `{ ok: true, processed: false }`.
+
+Jobs dedupe via `jobKey` on enqueue (providers do the work) and via natural keys in the handler's write. Both together mean "at-least-once delivery + idempotent handlers" is the posture, not "exactly-once".
+
+## HTTPS, TLS, and timeouts
+
+- **HTTPS required.** Every provider rejects `http://` endpoints in prod. Your deploy target should terminate TLS before the API; the API itself speaks HTTP on its internal port.
+- **Respond fast.** Providers have short timeout windows (Stripe: ~30s before treating it as failed). The webhook controller does the minimum inline — verify, dedupe, upsert, respond — then everything else happens via domain events + projectors.
+- **Return 2xx on dedupe.** Don't return 4xx for a replayed event; providers would stop delivering. The service returns `{ ok: true, processed: false }` as a 200.
+
+## Local dev with real webhooks
+
+See *npm run dev* for the short version. Long version: get a smee.io URL, register it with your provider, set `SMEE_URL` and `SMEE_TARGET_PATH` in `apps/api/.env`, and `apps/webhook-tunnel` will forward real deliveries to your local API with signatures intact.

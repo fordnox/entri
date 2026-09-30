@@ -1,0 +1,69 @@
+---
+title: First migration + seed
+description: Get a schema into your Postgres, then drop in just enough rows to log in and click around.
+kicker: 01 · Getting started
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+## Run the first migration
+
+The schema lives at `apps/api/src/db/drizzle/schema.ts`. With your `DATABASE_URL` set, apply every existing migration from the repo — or generate your first one, if you've touched the schema:
+
+```bash
+# generate a new SQL migration from schema edits
+npm run drizzle:generate
+# apply every pending migration to DATABASE_URL
+npm run drizzle:migrate
+```
+
+`drizzle-kit generate` diffs the current schema against the previous one and emits a new SQL file under `apps/api/drizzle/migrations/`. `drizzle-kit migrate` then applies every pending file in order. Both commands read `apps/api/drizzle/drizzle.config.ts`.
+
+<DocsCallout>
+  Drizzle's types are inferred directly from <code>src/db/drizzle/schema.ts</code> at compile time — there's no client-regen step to run between schema edits and typecheck.
+</DocsCallout>
+
+### Starting over
+
+Drizzle has no single "reset" command. The simplest equivalent is to drop and recreate the database (e.g. `dropdb` + `createdb` if you're on local Postgres), then re-run `npm run drizzle:migrate`. Destructive and non-interactive — don't point it at anything shared.
+
+## Seed the demo workspace
+
+Once migrations have run, seed a minimal workspace so you can sign in and click through the settings UI:
+
+```bash
+npx tsx apps/api/drizzle/seed.ts
+```
+
+The seed is idempotent — running it again does nothing. It creates:
+
+- One demo **user** (email `owner@wereorbit.com`, already email-verified).
+- One **workspace** with slug `demo`.
+- Three **system roles**: OWNER, ADMIN, MEMBER — each seeded with the default permission set from `@orbit/shared/permissions`.
+- One **workspace member** binding the demo user to the OWNER role.
+
+<DocsCallout>
+  That's it. No teams, no subscriptions, no invites, no waitlist entries. Features built on top of the kit should seed themselves from their own scripts instead of expanding this one.
+</DocsCallout>
+
+### Using your own email
+
+Pass overrides as env vars to the same command — handy when you want magic links to actually land in your inbox:
+
+```bash
+SEED_OWNER_EMAIL=you@yourdomain.com \
+SEED_OWNER_NAME="Your Name" \
+SEED_WORKSPACE_SLUG=acme \
+SEED_WORKSPACE_NAME="Acme" \
+  npx tsx apps/api/drizzle/seed.ts
+```
+
+## Signing in
+
+Start the stack with `npm run dev`, open `http://localhost:4001/login`, and enter the seeded email. In dev without `RESEND_API_KEY`, the ConsoleMailer logs the magic-link URL to the API's stdout and also exposes it at:
+
+```bash
+GET http://localhost:4002/v1/dev/last-magic-link?email=owner@wereorbit.com
+```
+
+Open that URL in a browser and you land inside the demo workspace, signed in as the owner.

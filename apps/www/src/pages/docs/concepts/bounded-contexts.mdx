@@ -1,0 +1,118 @@
+---
+title: DDD bounded contexts for SaaS
+description: Each piece of the product is a folder. Each folder has the same three layers. Every context looks alike.
+kicker: 02 · Concepts
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+The API is organized as a set of **bounded contexts** — one folder per domain — each with the same internal shape. The shape is the point: once you've written one context, you've written them all. When you add a new one, you paste in the same three layers and get type safety, a repository port, the Unit of Work, and realtime dispatch for free.
+
+## The contexts
+
+<DocsTable
+  columns={["Folder", "Responsibility"]}
+  rows={[
+    [<code>identity/</code>, "Users, sessions, accounts, verification."],
+    [<code>workspaces/</code>, "Workspaces, members, roles, invites. Owns PBAC at the workspace scope."],
+    [<code>teams/</code>, "Teams, team members, team roles. Nested inside a workspace. Optional."],
+    [<code>billing/</code>, "Billing customers, subscriptions, webhooks. Optional."],
+    [<code>uploads/</code>, "Signed upload endpoints with UploadThing and S3 / R2 adapters. Optional."],
+    [<code>waitlist/</code>, "Waitlist entries + admin acceptance. Optional."],
+    [<code>jobs/</code>, "Background job scheduling — provider-agnostic queue + runtime."],
+  ]}
+/>
+
+## Cross-cutting concerns
+
+Things that every context uses live at the top level of `apps/api/src/`:
+
+- `kernel/` — `Clock`, `EventBus`, `UnitOfWork`, `Result<T>`, `DomainError`, and branded `Id<K>` types.
+- `realtime/` — in-process pub/sub hub + presence tracker + the projectors that fan domain events out to WebSocket subscribers.
+- `infrastructure/` — ORM client, UoW impl, the Resend mailer, the UploadThing and S3 clients, etc.
+- `interfaces/` — the delivery mechanisms: HTTP controllers, the WebSocket handler, scheduled job handlers.
+- `composition.ts` — the single file where dependencies are wired. Every service, repository, projector, and adapter is constructed here.
+
+## The three layers, every time
+
+Open any context folder and you'll see the same three subfolders:
+
+**apps/api/src/workspaces/**
+
+```
+workspaces/
+├── domain/          # Entities, value objects, events, repository interfaces
+├── application/     # Service classes (use cases), projectors
+└── infrastructure/  # ORM repositories, adapters
+```
+
+### Domain
+
+Aggregates, value objects, domain events, and repository *interfaces*. No framework imports, no ORM, no Hono — just TypeScript that describes the business invariants. Aggregates are constructed via named factories (`Workspace.open`, `WorkspaceMember.join`) that enforce invariants and enqueue events:
+
+```
+export class Workspace {
+  static open(input: { slug, name, ownerId }, clock): Workspace { ... }
+  rename(next: string): void { ... }
+  pullEvents(): DomainEvent[] { ... }
+}
+```
+
+### Application
+
+Service classes — one per use case. Each service orchestrates reads and writes through the Unit of Work, calls aggregate methods, collects their events, and returns a plain result. Nothing here knows about HTTP or request shapes:
+
+**apps/api/src/workspaces/application/**
+
+```
+create-workspace.service.ts
+accept-invite.service.ts
+invite-member.service.ts
+change-member-role.service.ts
+create-role.service.ts
+update-role.service.ts
+delete-role.service.ts
+remove-workspace-member.service.ts
+revoke-invite.service.ts
+list-members.service.ts
+list-roles.service.ts
+...
+```
+
+Projectors also live here — classes that subscribe to events on the `EventBus` and push side effects. The realtime publisher and the mailer projectors are both structured this way.
+
+### Infrastructure
+
+ORM-backed implementations of the domain repositories, plus any provider adapters that belong to the context. This is the only layer that imports the Drizzle client:
+
+```
+apps/api/src/workspaces/infrastructure/
+
+drizzle-workspace.repository.ts
+drizzle-workspace-member.repository.ts
+drizzle-workspace-role.repository.ts
+drizzle-invite.repository.ts
+```
+
+Each implements the interface defined in `domain/repositories.ts`, translating between database rows and domain aggregates.
+
+## Why this shape?
+
+- **The domain survives rewrites.** Swapping an ORM or a provider is an `infrastructure/` change — `domain/` and `application/` stay untouched.
+- **Tests are cheap.** Service tests use a recording event bus + in-memory repositories; no containers, no migrations, no mocks.
+- **Adapters are swappable.** Stripe, Polar, and Dodo all implement the same `BillingProvider` port. Adding a fourth is a new file, not a refactor.
+- **Events are the seam.** Anything that needs to happen as a consequence of a domain change — realtime push, an email, a downstream update — subscribes to an event rather than being inlined into the service that produced it.
+
+## Adding a context
+
+The mechanical path:
+
+1. Create `src/<name>/{domain,application,infrastructure}/`.
+2. Define your aggregates, events, and repository interfaces in `domain/`.
+3. Add the repository to `TxContext` in `kernel/uow.ts` and wire the implementation into `infrastructure/drizzle-uow.ts`.
+4. Write services in `application/`; collect events via `tx.events.add(...)`.
+5. Wire everything in `composition.ts`, and if the context has HTTP endpoints, add a controller under `interfaces/http/controllers/`.
+
+<DocsCallout>
+  The *Add a bounded context* guide (coming soon) walks through a minimal example end-to-end with concrete file diffs.
+</DocsCallout>

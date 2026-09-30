@@ -1,0 +1,171 @@
+---
+title: Transactional email — Mailer port + Resend
+description: Six methods. One dev-friendly stub. React Email templates for anything fancier.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+Email is the only system effect that fires from projectors, not from services. That keeps the domain layer free of "send email" side effects and makes switching providers a drop-in change.
+
+## The port
+
+**apps/api/src/infrastructure/mailer.ts**
+
+```ts
+export interface Mailer {
+  sendMagicLink(email: MagicLinkEmail): Promise<void>;
+  sendInvite(email: InviteEmail): Promise<void>;
+  sendChangeEmailVerification(email: ChangeEmailVerificationEmail): Promise<void>;
+  sendChangeEmailNotice(email: ChangeEmailNoticeEmail): Promise<void>;
+  sendAccountDeletionVerification(email: AccountDeletionVerificationEmail): Promise<void>;
+  sendEmailVerification(email: EmailVerificationEmail): Promise<void>;
+}
+```
+
+Six methods covering the transactional emails the domain produces today — magic-link sign-in, workspace invites, the three verification flows (signup, email change, account deletion), and a best-effort FYI notice to the previous address when an email is changed. When you add a new email — export ready, plan downgraded, support reply — extend the interface, add an implementation on each adapter, and have a projector call it.
+
+<DocsCallout kind="note">
+  <code>sendEmailVerification</code> is the hook better-auth calls during password signup. Password accounts can't sign in until the address is verified, so the mailer is part of the kit's account-takeover defence — a misconfigured provider is a sign-in blocker, not a silent drop.
+</DocsCallout>
+
+## Two implementations
+
+### ConsoleMailer (dev default)
+
+Logs every send to stdout and stashes the most recent magic link in memory for the dev helper endpoint. Nothing actually leaves the process:
+
+```
+GET http://localhost:4002/v1/dev/last-magic-link?email=owner@wereorbit.com
+```
+
+This returns `{ link: string | null }` — always 404 when `NODE_ENV=production`, so it can't leak in prod even if accidentally left mounted.
+
+### ResendMailer (prod default)
+
+**apps/api/src/infrastructure/resend-mailer.tsx**
+
+```ts
+export class ResendMailer implements Mailer {
+  private readonly client: Resend;
+  constructor(apiKey: string, private readonly from: string) {
+    this.client = new Resend(apiKey);
+  }
+
+  async sendMagicLink(email: MagicLinkEmail): Promise<void> {
+    const { html, text } = await renderEmail(SignInMagicLinkEmail, { ... });
+    await this.client.emails.send({
+      from: this.from,
+      to: email.to,
+      subject: "Sign in to Orbit",
+      html, text,
+    });
+  }
+  // sendInvite follows the same shape
+}
+```
+
+## Which one gets used?
+
+The factory in `resend-mailer.tsx` picks at boot time:
+
+```ts
+const useResend =
+  Boolean(RESEND_API_KEY) &&
+  (NODE_ENV === "production" || RESEND_SEND_IN_DEV === "1");
+
+return useResend ? new ResendMailer(apiKey, from) : new ConsoleMailer();
+```
+
+- **Prod + key set** → Resend. If the key is set but `RESEND_FROM` isn't, the factory throws — fail loud rather than silently drop emails.
+- **Dev** → ConsoleMailer by default. Set `RESEND_SEND_IN_DEV=1` to force real sends — handy for template QA.
+- **Prod + no key** → ConsoleMailer. Yes, you're flying blind. Check your env.
+
+## How projectors use it
+
+Services collect domain events via the Unit of Work; projectors pick them up post-commit and ask the mailer to send. The invite flow is the canonical example:
+
+```ts
+// application: InviteMemberService
+await uow.run(async (tx) => {
+  const invite = WorkspaceInvite.create({ ... }, clock);
+  await tx.workspaceInvites.save(invite);
+  tx.events.addMany(invite.pullEvents());  // WorkspaceInvited
+});
+
+// application/projectors: InviteMailerProjector
+bus.subscribe<WorkspaceInvited>("workspaces.invite.created", async (event) => {
+  const invite = await uow.read(tx => tx.workspaceInvites.findById(event.inviteId));
+  if (!invite) return;
+  await mailer.sendInvite({
+    to: invite.email,
+    inviteUrl: `${webOrigin}/invites/accept?token=${invite.token}`,
+    workspaceName,
+  });
+});
+```
+
+<DocsCallout>
+  Projectors run after commit, so a failed email send doesn't roll back the invite row. The trade-off: if Resend throws, you lose the send. For recoverable sends (scheduled reminders, digests), enqueue a job instead — see the <em>Jobs</em> integration page.
+</DocsCallout>
+
+## Magic links via better-auth
+
+The magic-link plugin for better-auth calls the mailer directly — no projector needed, because the token is short-lived and the user initiated it:
+
+**apps/api/src/interfaces/http/better-auth.ts**
+
+```ts
+magicLink({
+  expiresIn: config.magicLinkTtlMinutes * 60,
+  sendMagicLink: async ({ email, token, url }) => {
+    await mailer.sendMagicLink({
+      to: email,
+      token,
+      link: url,
+      expiresAt: new Date(Date.now() + ttlMs),
+    });
+  },
+})
+```
+
+## React Email templates
+
+Templates live in `apps/api/src/emails/` as `.tsx` files. Each exports a React component plus a props type, and shares typography via `orbit-email-styles.ts`.
+
+**apps/api/src/emails/magic-link-email.tsx**
+
+```tsx
+export function SignInMagicLinkEmail({ magicLinkUrl, expiresAtLabel }) {
+  return (
+    <Html lang="en">
+      <Head />
+      <Preview>Sign in to Orbit</Preview>
+      <Body style={orbitEmailStyles.page}>
+        <Container style={orbitEmailStyles.container}>
+          <Section style={orbitEmailStyles.card}>
+            <Text style={orbitEmailStyles.eyebrow}>Orbit</Text>
+            <Heading as="h1">Sign in to your workspace</Heading>
+            <Button href={magicLinkUrl}>Sign in to Orbit</Button>
+            <Text>Expires around {expiresAtLabel}.</Text>
+          </Section>
+        </Container>
+      </Body>
+    </Html>
+  );
+}
+```
+
+The adapter renders these via `@react-email/components` — HTML and plain-text versions both come out, and the mailer ships both to Resend so everything from CLI clients to Apple Mail renders it correctly.
+
+## Swapping to a different provider
+
+Three files, in order:
+
+1. Implement `Mailer` in a new file — `postmark-mailer.ts`, `smtp-mailer.ts`, whatever. All six methods — TypeScript will fail the build until they're all there.
+2. Update the factory (`createDefaultMailer`) — or keep Resend and dispatch at a higher level by reading your own env var.
+3. Replace `RESEND_API_KEY` with your provider's secret.
+
+<DocsCallout>
+  Projectors don't need to know the adapter changed. They call <code>mailer.sendInvite(...)</code> — whatever's plugged in speaks the same shape.
+</DocsCallout>

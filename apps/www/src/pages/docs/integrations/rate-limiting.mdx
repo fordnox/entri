@@ -1,0 +1,218 @@
+---
+title: Rate limiting — in-memory, Upstash Redis & Unkey
+description: A pluggable RateLimiter port. In-memory fallback for dev, Upstash Redis or Unkey for production — pick one per deploy.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Rate limiting guards the public surfaces where abuse is cheap: magic-link send, password sign-up, password sign-in, forget-password, and the waitlist join endpoint. It's also the backstop that keeps one IP or one email address from running up your transactional-email bill.
+
+The shape is the same as billing and jobs: one port, multiple adapters, picked by a single env var at boot.
+
+## The port
+
+**apps/api/src/kernel/rate-limiter.ts**
+
+```ts
+export interface RateLimit {
+  requests: number;
+  windowSeconds: number;
+}
+
+export interface RateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  resetAt: Date;
+  limit: RateLimit;
+}
+
+export interface RateLimiter {
+  check(key: string, limit: RateLimit): Promise<RateLimitResult>;
+}
+```
+
+Adapters throw on backend errors; the composition root wraps every remote adapter (Upstash, Unkey) in a `CircuitBreakerRateLimiter` that decides how to respond when the backend is degraded. After 5 consecutive errors the breaker opens and fails **closed** (denies requests) for a 30-second cooldown, then half-open probes. This prevents an attacker who can induce errors — by saturating your Upstash quota, for example — from silently removing all rate limits.
+
+## The adapters
+
+<DocsTable
+  columns={["Provider", "State", "Best for"]}
+  rows={[
+    [
+      <code>noop</code>,
+      "None — always allows",
+      "Tests and local debugging. Never in production.",
+    ],
+    [
+      <code>memory</code>,
+      "In-process sliding window Map",
+      "Dev default and small single-instance deploys.",
+    ],
+    [
+      <code>upstash</code>,
+      "Shared Redis via @upstash/ratelimit",
+      "Production with generic rate limiting. Works behind a load balancer and on serverless.",
+    ],
+    [
+      <code>unkey</code>,
+      "Managed via @unkey/ratelimit",
+      "Production when you also ship API keys — Unkey pairs rate limiting with per-key quotas and a dashboard.",
+    ],
+  ]}
+/>
+
+<DocsCallout kind="warn">
+  The <code>memory</code> adapter is single-process only: state is not shared across Node workers, is lost on restart, and does NOT protect a horizontally scaled or serverless deploy. The API logs a loud warning at boot when <code>NODE_ENV=production</code> and the provider is <code>memory</code> or <code>noop</code> — production should always be <code>upstash</code>.
+</DocsCallout>
+
+### InMemoryRateLimiter (dev default)
+
+A sliding-window bucket keyed on the request, using the container's `Clock` so tests can advance time deterministically. The Map lazily sweeps stale buckets when it crosses 1024 entries to keep memory bounded on spiky public endpoints.
+
+### UpstashRateLimiter (prod)
+
+Backed by `@upstash/ratelimit` with a sliding-window algorithm and a single shared `Redis` client. One `Ratelimit` instance is cached per unique `(requests, windowSeconds)` shape so the SDK's server-side Lua scripts stay stable. On any Upstash error the adapter logs and returns `allowed: true` — the auth surface stays up.
+
+### UnkeyRateLimiter (prod, API-key-friendly)
+
+Backed by `@unkey/ratelimit`. Unkey bakes the `(limit, duration)` pair into each `Ratelimit` instance, so the adapter caches one instance per unique shape and suffixes the shape onto the configured namespace — that way different routes with different limits show up as distinct series in the Unkey dashboard instead of commingling. Also fails open on network error. Pick this if you plan to ship public API keys later; Unkey's rate-limit product is part of the same SDK as its key-issuance product.
+
+## Environment variables
+
+<DocsTable
+  columns={["Var", "Scope", "What it does"]}
+  rows={[
+    [
+      <code>RATE_LIMIT_PROVIDER</code>,
+      "all",
+      <>
+        <code>noop</code> / <code>memory</code> (default) / <code>upstash</code> / <code>unkey</code>.
+      </>,
+    ],
+    [
+      <code>UPSTASH_REDIS_REST_URL</code>,
+      "upstash",
+      "REST URL for the Upstash Redis database backing the limiter.",
+    ],
+    [
+      <code>UPSTASH_REDIS_REST_TOKEN</code>,
+      "upstash",
+      "REST token with read/write access. Rotate with the Upstash dashboard's 'regenerate' flow.",
+    ],
+    [
+      <code>UNKEY_ROOT_KEY</code>,
+      "unkey",
+      "Root API key from the Unkey dashboard. Scoped to the workspace that owns the rate-limit namespace.",
+    ],
+    [
+      <code>UNKEY_RATELIMIT_NAMESPACE</code>,
+      "unkey",
+      <>Namespace prefix shown in the Unkey dashboard. Defaults to <code>orbit</code>.</>,
+    ],
+  ]}
+/>
+
+<DocsCallout kind="note">
+  Picking <code>upstash</code> or <code>unkey</code> without supplying the required credentials throws at boot, so a misconfigured production deploy fails fast instead of silently falling back to a weaker mode.
+</DocsCallout>
+
+## Privacy: bucket keys are hashed
+
+When the middleware keys a limiter by email (e.g. `auth.sign-in.email:email:<address>`), the email is HMAC-SHA256'd with `BETTER_AUTH_SECRET` and truncated to 16 hex chars before becoming a bucket key. Raw user emails never land in Upstash Redis keys or the Unkey dashboard — third-party backends are not subprocessors for your users' PII.
+
+## Body-size cap on the rate-limited surface
+
+The email-keyed limiter awaits `c.req.raw.json()` to read the `email` field — without a body cap, a slow-loris or oversized body would park a worker and could OOM the process. `/v1/auth/*` and `/v1/waitlist` therefore have an 8 KiB body cap applied *before* the rate limiters; oversized requests 413 with `payload_too_large`.
+
+## What's protected
+
+The API ships a Hono middleware wired onto the auth and waitlist surface. Each route gets two layered checks: a tight per-IP limit to blunt bursts, and a wider per-email limit so one address can't be ground against from a botnet. The middleware emits standard `RateLimit-Limit` / `RateLimit-Remaining` / `RateLimit-Reset` headers on every response and `Retry-After` on blocks.
+
+<DocsTable
+  columns={["Route", "Per-IP", "Per-email"]}
+  rows={[
+    [
+      <code>POST /v1/auth/sign-in/magic-link</code>,
+      "10 / minute",
+      "5 / hour",
+    ],
+    [
+      <code>POST /v1/auth/sign-up/email</code>,
+      "5 / hour",
+      "3 / hour",
+    ],
+    [
+      <code>POST /v1/auth/sign-in/email</code>,
+      "20 / minute",
+      "10 / hour",
+    ],
+    [
+      <code>POST /v1/auth/forget-password</code>,
+      "5 / hour",
+      "3 / hour",
+    ],
+    [
+      <code>POST /v1/waitlist</code>,
+      "10 / hour",
+      "3 / day",
+    ],
+    [
+      <code>POST /v1/demo/start</code>,
+      <>
+        <code>DEMO_RATE_LIMIT_PER_HOUR</code> (default 3) per IP
+      </>,
+      "—",
+    ],
+  ]}
+/>
+
+## Calling it from your own code
+
+The limiter is on the container. Apply the shared middleware to a Hono route:
+
+```ts
+import { rateLimit } from "@/interfaces/http/middleware/rate-limit";
+import { getClientIp } from "@/interfaces/http/client-ip";
+
+app.use(
+  "/v1/feedback",
+  rateLimit({
+    name: "feedback.ip",
+    key: (c) => `ip:${getClientIp(c)}`,
+    limit: { requests: 20, windowSeconds: 3600 },
+  }),
+);
+```
+
+Or call `container.rateLimiter.check(...)` inline when you need a dynamic limit (e.g. one read from config or scaled by the caller's plan). `POST /v1/demo/start` does this — it reads the per-hour quota from `config.demo.rateLimitPerHour` at request time.
+
+## Headers the clients see
+
+```
+# Allowed
+RateLimit-Limit:     10
+RateLimit-Remaining: 7
+RateLimit-Reset:     48
+
+# Blocked (429)
+RateLimit-Limit:     10
+RateLimit-Remaining: 0
+RateLimit-Reset:     32
+Retry-After:         32
+```
+
+On block the body is the standard error shape: `{"error":{"code":"rate_limited","message":"..."}}`. Blocks are also recorded via evlog with `action: "ratelimit.block"` so you can alert on sudden spikes.
+
+## Client IP resolution
+
+Bucketing by IP only works if you can trust the IP. The helper at `apps/api/src/interfaces/http/client-ip.ts` prefers platform-trusted headers before falling back to the leftmost entry of `X-Forwarded-For`:
+
+1. `fly-client-ip` (Fly.io edge)
+2. `cf-connecting-ip` (Cloudflare edge)
+3. `x-real-ip` (trusted reverse proxy)
+4. `x-forwarded-for` (last resort)
+
+<DocsCallout kind="warn">
+  On deploys behind a proxy chain that lets the client inject these platform headers before they reach a trusted edge, the limiter is bypassable. For non-Fly / non-Cloudflare / non-Vercel deploys, front the API with a proxy that strips untrusted instances of these headers before forwarding.
+</DocsCallout>

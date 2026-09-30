@@ -1,0 +1,34 @@
+---
+title: Quickstart
+description: Ship a running Orbit dashboard in under 5 minutes. Three commands, and npm run setup handles everything else — Postgres, env files, migrations, even generating a better-auth secret.
+kicker: 01 · Getting started
+---
+
+
+## Prerequisites
+
+Node 20+ and either Docker (for the bundled local Postgres) or a Postgres instance you already have reachable.
+
+## Three commands
+
+```bash
+git clone https://github.com/were-orbit/orbit-starter.git
+cd orbit-starter
+npm install && npm run setup
+npm run dev
+```
+
+## What `npm run setup` does
+
+- Checks Node version and Postgres reachability (offers to start the bundled docker compose if not).
+- Copies `.env.example` to `.env` for each app and prompts for any values you need to fill.
+- Auto-generates HMAC secrets (`BETTER_AUTH_SECRET`, etc.) so you don't have to.
+- Runs migrations — `drizzle-kit migrate` against your `DATABASE_URL`.
+- Offers to seed a demo workspace.
+
+## Next
+
+- [Prerequisites](/docs/getting-started/prerequisites) — more detail on what you need installed.
+- [Environment variables](/docs/getting-started/environment-variables) — every knob the kit exposes.
+- [OAuth](/docs/integrations/oauth) — wiring up Google / Apple.
+- [Billing](/docs/integrations/billing) — Stripe / Polar / Dodo setup.

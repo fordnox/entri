@@ -1,0 +1,113 @@
+---
+title: Running the CLI
+description: One command. A handful of prompts. A project that only ships the features you asked for.
+kicker: 01 · Getting started
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+```bash
+npx create-orb@latest
+```
+
+That's it. The CLI greets you, asks where to put the project, walks through a short set of feature prompts, and scaffolds a fresh copy of the kit into the directory you picked.
+
+<DocsCallout>
+  Nothing is written to disk until you confirm the summary at the end — a <code>^C</code> before that point is a clean no-op.
+</DocsCallout>
+
+## What the prompts ask
+
+Say "no" to a feature and the CLI omits every file, env var, permission, route, and database model tied to it — the scaffolded project only contains what you asked for.
+
+<DocsTable
+  columns={["Prompt", "Default", "What it controls"]}
+  rows={[
+    [
+      "Teams + per-team PBAC",
+      "on",
+      "Nested team scope inside a workspace. Off = workspace-only roles.",
+    ],
+    [
+      "Billing",
+      "on",
+      <>
+        Subscriptions, webhooks, customer portal. If on, you're also asked <em>which</em> provider — Stripe, Polar, or Dodo.
+      </>,
+    ],
+    [
+      "File uploads",
+      "on",
+      "Avatars + image uploads via UploadThing or an S3-compatible bucket (R2, S3, MinIO).",
+    ],
+    [
+      "Waitlist / private beta",
+      "off",
+      "Gates /onboarding behind an allowlist; POST /v1/waitlist still accepts submissions either way.",
+    ],
+    [
+      "Realtime (WebSocket)",
+      "on",
+      "Presence, live updates, the /v1/ws endpoint.",
+    ],
+    [
+      "Resend email adapter",
+      "on",
+      "Off ships the ConsoleMailer, which logs magic links to stdout.",
+    ],
+    [
+      "OAuth (Google + Apple)",
+      "on",
+      "Off keeps magic-link-only sign-in.",
+    ],
+    [
+      "Background jobs + cron",
+      "on",
+      <>
+        Provider-neutral queue. If on, you're asked whether to use <code>graphile-worker</code> or Upstash <code>QStash</code>.
+      </>,
+    ],
+    [
+      "Web framework",
+      "TanStack",
+      "Pick TanStack Start (Vite, :4001) or Next 16 App Router (:4003). The other app folder is removed.",
+    ],
+  ]}
+/>
+
+## Non-interactive mode
+
+Every prompt has a corresponding flag, and `--yes` accepts every default. Useful for CI, scripted spin-ups, and regenerating the same variant over and over:
+
+```bash
+npx create-orb@latest ./my-app --yes \
+  --no-teams \
+  --billing-provider=polar \
+  --framework=next \
+  --jobs-provider=qstash
+```
+
+Run `npx create-orb@latest --help` for the full list of flags.
+
+## What actually happens
+
+1. **Template acquisition.** The CLI either clones `github.com/were-orbit/orbit-starter` (default) or copies a local path you passed with `--from`. The target directory must be empty or not yet exist.
+2. **Strip pass.** The CLI removes every file, code section, and dependency tied to a feature you turned off, then writes the slimmed-down project to disk.
+3. **Script repoint.** If you picked Next, the CLI rewrites the root `dev:web` script to target `@orbit/web-next` and drops the stale `dev:web-tanstack` shortcut. TanStack is the no-op default.
+4. **Install (optional).** `npm install` runs for you unless you pass `--no-install`.
+
+## Next steps
+
+The CLI prints these at the end. Follow them in order:
+
+```bash
+cd my-app
+npm install    # if you passed --no-install
+cp apps/api/.env.example apps/api/.env   # fill in secrets
+npm run drizzle:migrate
+npm run dev
+```
+
+### Re-running the CLI
+
+The CLI is one-shot: it scaffolds a new project, it doesn't patch an existing one. If you wish you'd kept billing on, it's easier to diff against a second scaffold than to rerun the tool against the same directory.

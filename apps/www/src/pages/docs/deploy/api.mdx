@@ -1,0 +1,150 @@
+---
+title: Deploy the API
+description: One Dockerfile, one migrate-then-boot sequence, and a handful of env vars. Any long-lived-container host will do.
+kicker: 06 · Deploy
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+`apps/api` is a long-running Node process. It needs a host that can run a container, hold a WebSocket open, and — if you're using graphile-worker — keep a worker loop alive. Fly, Railway, Render, Kamal, Cloud Run, or your own VM all fit. Serverless targets (Lambda, Vercel Functions) don't, because of the worker + WS.
+
+## The Dockerfile
+
+`apps/api/Dockerfile` is a multi-stage build. The stages worth knowing by name:
+
+<DocsTable
+  columns={["Stage", "Purpose"]}
+  rows={[
+    [<code>pruner</code>, <><code>turbo prune @orbit/api --docker</code> — narrows the build context to just what the API needs.</>],
+    [<code>deps</code>, "npm ci with every dependency including devDeps."],
+    [<code>builder</code>, <><code>tsc</code> — emits the compiled API.</>],
+    [<code>prod-deps</code>, <><code>npm ci --omit=dev</code> for the final runtime image.</>],
+    [<code>migrate</code>, <>One-shot entrypoint: <code>drizzle-kit migrate</code>.</>],
+    [<code>runtime</code>, <>Default target. <code>node --import tsx src/index.ts</code> under <code>tini</code>.</>],
+  ]}
+/>
+
+<DocsCallout kind="warn">
+  Build with the <strong>repo root</strong> as context — not <code>apps/api</code> — because turbo prune needs to see the workspace topology:
+</DocsCallout>
+
+```
+# from the repo root
+docker build -f apps/api/Dockerfile -t orbit-api .
+docker build -f apps/api/Dockerfile --target migrate -t orbit-api-migrate .
+```
+
+## Migrate, then boot
+
+Orbit separates migrations from the API process on purpose: running them under the API's startup gives you a race when N instances boot at once, and ties "deploy failed" to "migration still running." Every deploy target gets the same two-step:
+
+1. Run the `migrate` image (or the equivalent pre-deploy command) to completion.
+2. Start the `runtime` image once migrations have succeeded.
+
+**docker-compose.yml**
+
+```
+services:
+  api-migrate:
+    build:
+      dockerfile: apps/api/Dockerfile
+      target: migrate
+    restart: "no"
+
+  api:
+    build:
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      api-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4002/health').then(r=>process.exit(r.ok?0:1))"]
+```
+
+## Platform recipes
+
+### Railway
+
+`apps/api/railway.toml` ships with the repo. Point a Railway service at that file and you get the right build command, pre-deploy migrate, and start command for free:
+
+**apps/api/railway.toml**
+
+```toml
+[build]
+watchPatterns = [
+  "package.json", "package-lock.json", "turbo.json",
+  "apps/api/**", "packages/shared/**",
+]
+buildCommand = "npm ci && npx turbo run build --filter=@orbit/api"
+
+[deploy]
+preDeployCommand = "npm exec --workspace=@orbit/api drizzle-kit migrate --config=drizzle/drizzle.config.ts"
+startCommand = "npm run start --workspace=@orbit/api"
+```
+
+The watch patterns are tight — only rebuild when API or `@orbit/shared` change. Add `packages/ui` to the list if your API imports from it; by default it doesn't.
+
+### Fly.io
+
+Fly doesn't ship a config file with the repo — write one at `fly.toml`:
+
+**fly.toml**
+
+```toml
+# fly.toml (run `fly launch --no-deploy` first to scaffold, then edit)
+app = "orbit-api"
+primary_region = "ord"
+
+[build]
+  dockerfile = "apps/api/Dockerfile"
+
+[deploy]
+  release_command = "/app/node_modules/.bin/drizzle-kit migrate --config=apps/api/drizzle/drizzle.config.ts"
+
+[http_service]
+  internal_port = 4002
+  force_https = true
+  auto_stop_machines = false  # keep alive; WS + worker
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  path = "/health"
+  interval = "15s"
+  grace_period = "30s"
+```
+
+<DocsCallout>
+  <code>auto_stop_machines = false</code> is load-bearing: graphile-worker + the WebSocket server both need the process to stay up. Letting Fly scale to zero kills background jobs.
+</DocsCallout>
+
+### Render
+
+- Create a "Web Service" pointing at `apps/api/Dockerfile` with the repo as build context.
+- Pre-deploy command: `npm exec --workspace=@orbit/api drizzle-kit migrate --config=drizzle/drizzle.config.ts`.
+- Health check path: `/health`.
+- Disable auto-sleep (paid plan) — same rationale as Fly.
+
+## Environment variables
+
+The API's `.env.example` is the full list. For a smoke-test prod deploy, you need at minimum:
+
+- `DATABASE_URL` — prod Postgres.
+- `BETTER_AUTH_SECRET` — long random string.
+- `API_ORIGIN`, `WEB_ORIGIN`, `WWW_ORIGIN` — the actual public URLs.
+- `RESEND_API_KEY` + `RESEND_FROM` — or your email provider's equivalent.
+
+Everything else gates a feature: billing, OAuth, uploads, jobs. If the env var is missing, the feature degrades to a noop rather than throwing on boot — so a minimal deploy is possible, and adding a feature later is a secret-update away.
+
+## WebSockets, sticky sessions, and scaling
+
+<DocsCallout kind="warn">
+  The realtime hub is in-process. Two API instances do not share state: a broadcast on instance A never reaches a socket on instance B. Until the hub gets a Redis/NATS-backed implementation, run a single instance, or sticky-route WebSocket connections per workspace.
+</DocsCallout>
+
+Sticky routing per workspace is the pragmatic path — every workspace is a natural shard. Hash `workspaceSlug` → backend at your load balancer (Fly's `fly-replay`, Cloudflare's custom-hash LB, or a Hono middleware that re-emits the request on the correct node).
+
+## Health & observability
+
+- `GET /health` — liveness. Returns `200 { ok: true }` once the container is up. Used by the docker-compose healthcheck and every deploy-platform's probe.
+- Structured logs via `evlog` — one JSON-lines event per request, with `user`, `workspace`, and `route` attached. Ship to Datadog, Axiom, Logtail, wherever.

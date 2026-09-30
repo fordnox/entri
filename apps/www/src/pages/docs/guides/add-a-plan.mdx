@@ -1,0 +1,126 @@
+---
+title: Add a plan + checkout button
+description: Create the product at your provider, list it in BILLING_PLANS_JSON, and the billing settings page renders it automatically.
+kicker: 03 · Guides
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+Adding a plan is mostly a provider-dashboard task — Orbit's side is a single env-var edit. The billing settings page renders whatever's in `BILLING_PLANS_JSON`; the checkout flow is one generic service that works for all three billing providers.
+
+## 1. Create the price at your provider
+
+### Stripe
+
+1. Dashboard → Products → Add product. Set name + description.
+2. Add a Price (recurring, monthly or yearly, the currency you want).
+3. Copy the price id — `price_1PAbc...`. That's what goes in `BILLING_PLANS_JSON`.
+
+### Polar
+
+1. Dashboard → Products → New product.
+2. Create a recurring price on it.
+3. Copy the *product* id (Polar bills by product, not price) — what Orbit calls `priceId` is the Polar product id. The adapter translates.
+
+### Dodo
+
+1. Dashboard → Products → Create, pick the recurring subscription type.
+2. Copy the product id — `pdt_...`. Same field as Polar.
+
+## 2. Add it to `BILLING_PLANS_JSON`
+
+The env var is a JSON array. Each entry is a `BillingPlan`. Add your new plan alongside the existing ones:
+
+**apps/api/.env**
+
+```bash
+BILLING_PLANS_JSON='[
+  {
+    "key": "pro",
+    "name": "Pro",
+    "description": "For growing teams.",
+    "priceId": "price_...",
+    "unitAmount": 800,
+    "currency": "usd",
+    "interval": "month",
+    "intervalCount": 1,
+    "features": ["Unlimited teams", "Priority support"]
+  },
+  {
+    "key": "scale",
+    "name": "Scale",
+    "description": "For teams going public.",
+    "priceId": "price_...",
+    "unitAmount": 2400,
+    "currency": "usd",
+    "interval": "month",
+    "intervalCount": 1,
+    "features": [
+      "Everything in Pro",
+      "SSO/SAML",
+      "Audit log export"
+    ]
+  }
+]'
+```
+
+The fields, in short:
+
+- `key` — stable identifier. The app reads this to match a subscription back to a plan.
+- `priceId` — the provider-side id. Stripe's `price_...`, Polar/Dodo's product id.
+- `unitAmount` — in cents.
+- `interval` — `"month"` or `"year"`.
+- `features` — bullet list rendered on the plan card. Marketing copy, not gating.
+
+<DocsCallout kind="warn">
+  `BILLING_PLANS_JSON` is read once at boot. Change it, restart the API, and the new plan appears. For zero-downtime plan rollouts across multiple instances: roll the fleet.
+</DocsCallout>
+
+## 3. What happens on the frontend
+
+The billing settings page calls `GET /v1/workspaces/:slug/billing/plans`, which returns what the provider's `listPlans()` hands back — in every adapter, that's the env-driven catalog.
+
+The plan card renders automatically. No component change, no client rebuild — it's data-driven end-to-end.
+
+## 4. The checkout button
+
+Each plan card shows a checkout button. Clicking it calls one endpoint:
+
+```
+POST /v1/workspaces/:slug/billing/checkout
+  { "planKey": "pro", "successUrl": "...", "cancelUrl": "..." }
+  → { "redirectUrl": "https://checkout.stripe.com/..." }
+```
+
+The service walks the same path regardless of provider:
+
+1. Look up the `BillingCustomer` for the workspace; if it doesn't exist, call `provider.createCustomer()` and save one.
+2. Find the plan in the catalog by `key`.
+3. Call `provider.startCheckout()` with the customer id, plan, and success/cancel URLs.
+4. Return the provider's redirect URL. The web app does a `window.location.href = redirectUrl`.
+
+## 5. The webhook closes the loop
+
+When the checkout completes, the provider POSTs a `subscription.created` (or equivalent) to `/v1/billing/webhooks/<provider>`. `HandleBillingWebhookService` verifies the signature, dedupes, then upserts a `Subscription` aggregate with `planKey: "pro"` resolved from the price/product id.
+
+The realtime publisher broadcasts `subscription.updated` on the workspace channel — every open tab flips from "Start a trial" to "Pro plan" without a reload.
+
+## 6. Gate a feature by plan
+
+Orbit doesn't ship plan-gating helpers — by design, because what counts as "Pro" is app-specific. Read the subscription where you need it:
+
+```ts
+// In a controller, after resolving the workspace:
+const sub = await uow.read(tx => tx.subscriptions.findByWorkspace(workspace.id));
+if (sub?.planKey !== "pro" && sub?.planKey !== "scale") {
+  throw new ForbiddenError("plan.insufficient");
+}
+```
+
+For client-side rendering, the subscription is already in the store — just check `subscriptionStore.current?.planKey` and render accordingly. It updates in realtime, so an upgrade takes effect the instant the webhook arrives.
+
+## Testing locally
+
+- **Stripe.** Use Stripe's dashboard "send test webhook", or run `stripe trigger checkout.session.completed` with the Stripe CLI pointed at your smee tunnel.
+- **Polar / Dodo.** Both have a "replay" button on webhook delivery rows in their dashboards. Replay a recent event to exercise the path.
+- **End-to-end.** Do a real checkout in test mode. Every provider has test-card numbers that succeed or fail predictably — `4242 4242 4242 4242` is the universal "works".

@@ -1,0 +1,89 @@
+---
+title: OAuth providers (Google + Apple) via better-auth
+description: better-auth OAuth setup for Google and Apple. Magic links are always on; OAuth providers only register when their credentials are both set.
+kicker: 05 · Integrations
+---
+
+import { DocsCallout } from "@/components/docs-layout";
+
+Auth in Orbit is handled by [better-auth](https://better-auth.com). Magic-link sign-in is the default and is always on. OAuth is additive: Google and Apple get registered as providers only when both their client id *and* client secret are present in env, so a half-configured provider never shows up on the login page.
+
+## Conditional registration
+
+**apps/api/src/composition.ts**
+
+```ts
+const googleClientId = process.env.GOOGLE_CLIENT_ID;
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+const appleClientId = process.env.APPLE_CLIENT_ID;
+const appleClientSecret = process.env.APPLE_CLIENT_SECRET;
+
+const social: NonNullable<AppConfig["social"]> = {};
+if (googleClientId && googleClientSecret) {
+  social.google = { clientId: googleClientId, clientSecret: googleClientSecret };
+}
+if (appleClientId && appleClientSecret) {
+  social.apple = { clientId: appleClientId, clientSecret: appleClientSecret };
+}
+```
+
+The `social` object is handed to better-auth only if it has at least one key:
+
+**apps/api/src/interfaces/http/better-auth.ts**
+
+```ts
+socialProviders:
+  Object.keys(socialProviders).length > 0 ? socialProviders : undefined,
+```
+
+<DocsCallout>
+  The web shell renders Google and Apple buttons unconditionally — if the server never registered the provider, clicking the button just surfaces an error in the form. The buttons in the scaffolded login page (<code>apps/web-tanstack/src/pages/login.tsx</code>, <code>apps/web-next/src/views/login.tsx</code>) ship with <code>{`disabled={true}`}</code> so an unconfigured project can't dead-end users on a half-broken flow. Drop that flag once you've wired the credentials below.
+</DocsCallout>
+
+## Callback URLs
+
+better-auth mounts OAuth under `/v1/auth`, so the redirect URIs you register with each provider are:
+
+```
+${API_ORIGIN}/v1/auth/callback/google
+${API_ORIGIN}/v1/auth/callback/apple
+```
+
+`API_ORIGIN` has to match exactly — including protocol and port. In local dev that's `http://localhost:4002`; in prod it's whatever public hostname the API answers on.
+
+## Google
+
+1. Create a project in the [Google Cloud Console](https://console.cloud.google.com), then enable the OAuth consent screen.
+2. Create an OAuth 2.0 Client ID of type "Web application".
+3. Authorized redirect URI: `${API_ORIGIN}/v1/auth/callback/google`. Add both dev and prod if you need them.
+4. Copy the client id and secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in your API env.
+
+## Apple
+
+Sign in with Apple has more steps but the same shape. You'll need a Services ID, a Key, and the resulting JWT-signed client secret better-auth expects.
+
+1. In the Apple Developer portal, create a Services ID. Enable "Sign in with Apple".
+2. Add the return URL: `${API_ORIGIN}/v1/auth/callback/apple`.
+3. Generate a Key (type: Sign in with Apple) and download the `.p8`.
+4. Produce the short-lived client secret JWT (Apple rotates every 6 months; scripts exist in the ecosystem). Store it as `APPLE_CLIENT_SECRET`; the Services ID goes in `APPLE_CLIENT_ID`.
+
+<DocsCallout kind="warn">
+  Apple's client secret expires. Plan a rotation: script the regeneration, feed it to your secret manager, and restart the API. Nothing in Orbit manages this for you.
+</DocsCallout>
+
+## Linked vs. separate accounts
+
+better-auth's default behaviour: if someone signs in with Google using an email that already has an account (via magic link or another provider), the accounts are linked on the `Account` table. Orbit doesn't override this. A user can therefore have multiple `Account` rows (one per provider) but a single `User`.
+
+## Origins and CORS
+
+better-auth's cookie policy and CORS guard are driven by the same origin config we use elsewhere. The `trustedOrigins` list includes `WEB_ORIGIN`, `WWW_ORIGIN`, `API_ORIGIN`, and `ADDITIONAL_WEB_ORIGINS`. If you see "CSRF check failed" after an OAuth round-trip in a new environment, check that the initiating origin is in that list.
+
+## Adding another provider
+
+better-auth supports more than Google and Apple. To add one:
+
+1. Add the secret pair to `.env.example` and env validation in `composition.ts`.
+2. Extend the conditional block that builds `social` with the new provider key.
+3. Register the callback URI with the provider: `${API_ORIGIN}/v1/auth/callback/<provider>`.
+4. The web sign-in page reads the registered provider list from the API — no client code change needed.

@@ -1,0 +1,327 @@
+---
+title: Environment variables
+description: "Everything in apps/api/.env.example, grouped by what it turns on. The web shells need only two."
+kicker: 01 · Getting started
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+The API's env file is the source of truth for almost every adapter choice. Start by copying the example:
+
+```bash
+cp apps/api/.env.example apps/api/.env
+```
+
+Then fill in what you need. Only two variables are *strictly* required to boot the API:
+
+<DocsTable
+  columns={["Var", "Required", "Default"]}
+  rows={[
+    [<code>DATABASE_URL</code>, "yes", "—"],
+    [<code>BETTER_AUTH_SECRET</code>, "yes", <code>change-me-in-prod</code>],
+  ]}
+/>
+
+<DocsCallout kind="warn">
+  <code>BETTER_AUTH_SECRET</code> signs every session token. In prod, generate a long random string — <code>openssl rand -hex 32</code> is fine. If you leak or rotate it, every existing session logs out.
+</DocsCallout>
+
+## Database
+
+<DocsTable
+  columns={["Var", "What it does"]}
+  rows={[
+    [
+      <code>DATABASE_URL</code>,
+      "Postgres connection string. Used at runtime by the API and by migrations (drizzle-kit).",
+    ],
+    [
+      <code>DIRECT_DATABASE_URL</code>,
+      <>
+        Optional non-pooled URL. Set this if <code>DATABASE_URL</code> points at a transaction pooler (PgBouncer, PlanetScale psdb) — migration tools need direct connections for advisory locks.
+      </>,
+    ],
+  ]}
+/>
+
+## Auth & origins
+
+<DocsTable
+  columns={["Var", "Default", "What it does"]}
+  rows={[
+    [
+      <code>BETTER_AUTH_SECRET</code>,
+      <code>change-me-in-prod</code>,
+      "Session signing key. Required in every environment.",
+    ],
+    [
+      <code>MAGIC_LINK_TTL_MIN</code>,
+      "15",
+      "How long a magic link stays valid after it's minted.",
+    ],
+    [
+      <code>API_ORIGIN</code>,
+      "http://localhost:4002",
+      "Where the API answers. Used in mail templates and OAuth redirects.",
+    ],
+    [
+      <code>WEB_ORIGIN</code>,
+      "http://localhost:4001",
+      "Primary authenticated-app origin (allowed by CORS, trusted by better-auth).",
+    ],
+    [
+      <code>WWW_ORIGIN</code>,
+      "http://localhost:4000",
+      "Marketing site origin.",
+    ],
+    [
+      <code>ADDITIONAL_WEB_ORIGINS</code>,
+      <code>http://localhost:4003</code>,
+      "Comma-separated list of extra allowed web origins. Handy when running both web-tanstack and web-next against the same API.",
+    ],
+    [
+      <code>PORT</code>,
+      "4002",
+      "Port the API listens on. Change this if you change API_ORIGIN.",
+    ],
+  ]}
+/>
+
+## OAuth providers (optional)
+
+better-auth only registers providers whose client id *and* secret are both set. Leave them unset to disable:
+
+- `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET`
+- `APPLE_CLIENT_ID` + `APPLE_CLIENT_SECRET`
+
+Redirect URIs to register with each provider: `${API_ORIGIN}/v1/auth/callback/google` and `${API_ORIGIN}/v1/auth/callback/apple`.
+
+## Email
+
+<DocsTable
+  columns={["Var", "What it does"]}
+  rows={[
+    [
+      <code>RESEND_API_KEY</code>,
+      "Unset = ConsoleMailer (logs links to stdout + exposes them at GET /v1/dev/last-magic-link). Set = Resend in prod.",
+    ],
+    [
+      <code>RESEND_FROM</code>,
+      <>
+        Sender name + address. Format: <code>{"Orbit <hello@yourdomain.com>"}</code>
+      </>,
+    ],
+    [
+      <code>RESEND_SEND_IN_DEV</code>,
+      "Set to 1 to force Resend even in dev — useful for template QA.",
+    ],
+  ]}
+/>
+
+## Billing
+
+`BILLING_PROVIDER` is the master switch. When unset or set to `noop`, the billing routes return a disabled-state response and no provider SDK is constructed. Set it to one of `stripe` / `polar` / `dodo` to wire the matching adapter.
+
+### Plan catalog
+
+`BILLING_PLANS_JSON` is a JSON array of plan descriptors rendered on the billing settings page. Keep it small — once you outgrow a handful of plans, replace the env-backed source in `composition.ts` with a DB-backed provider.
+
+```bash
+BILLING_PLANS_JSON='[
+  {
+    "key": "pro",
+    "name": "Pro",
+    "priceId": "price_...",
+    "unitAmount": 800,
+    "currency": "usd",
+    "interval": "month",
+    "intervalCount": 1,
+    "features": ["Unlimited teams", "Priority email"]
+  }
+]'
+```
+
+### Per-provider secrets
+
+<DocsTable
+  columns={["Provider", "Vars"]}
+  rows={[
+    [
+      "Stripe",
+      <>
+        <code>STRIPE_SECRET_KEY</code>, <code>STRIPE_WEBHOOK_SECRET</code>
+      </>,
+    ],
+    [
+      "Polar",
+      <>
+        <code>POLAR_ACCESS_TOKEN</code>, <code>POLAR_WEBHOOK_SECRET</code>, <code>POLAR_SERVER</code> (<code>sandbox</code> | <code>production</code>)
+      </>,
+    ],
+    [
+      "Dodo",
+      <>
+        <code>DODO_PAYMENTS_API_KEY</code>, <code>DODO_PAYMENTS_WEBHOOK_KEY</code>, <code>DODO_PAYMENTS_ENVIRONMENT</code> (<code>test_mode</code> | <code>live_mode</code>)
+      </>,
+    ],
+  ]}
+/>
+
+## Background jobs
+
+`JOBS_PROVIDER` picks the adapter for the `JobQueue` and `JobRuntime` ports. Leave unset or set to `noop` to boot without background work; services that would enqueue a job 409 instead.
+
+<DocsTable
+  columns={["Var", "Scope", "What it does"]}
+  rows={[
+    [
+      <code>JOBS_PROVIDER</code>,
+      "both",
+      <>
+        <code>graphile</code> (Postgres-backed, self-hosted) / <code>qstash</code> (Upstash managed HTTP) / <code>noop</code>.
+      </>,
+    ],
+    [
+      <code>WORKER_DATABASE_URL</code>,
+      "graphile",
+      <>
+        Optional direct/session URL for LISTEN/NOTIFY. Fallback is <code>DATABASE_URL</code>.
+      </>,
+    ],
+    [
+      <code>JOBS_CONCURRENCY</code>,
+      "graphile",
+      "Parallelism for this worker instance. Default 2.",
+    ],
+    [
+      <code>QSTASH_TOKEN</code>,
+      "qstash",
+      "Publish-side API token from the Upstash console.",
+    ],
+    [
+      <code>QSTASH_CURRENT_SIGNING_KEY</code>,
+      "qstash",
+      "Current webhook-verification key (rotated by QStash).",
+    ],
+    [
+      <code>QSTASH_NEXT_SIGNING_KEY</code>,
+      "qstash",
+      "Next webhook-verification key; both are checked on delivery.",
+    ],
+    [
+      <code>QSTASH_CALLBACK_URL</code>,
+      "qstash",
+      "Public base URL of this API. Must be internet-reachable in dev (smee, ngrok, tunnel).",
+    ],
+  ]}
+/>
+
+## Rate limiting
+
+`RATE_LIMIT_PROVIDER` picks the adapter for the `RateLimiter` port. Leave unset or set to `memory` for the in-process sliding-window bucket; set to `upstash` for a Redis-backed limiter shared across workers and serverless instances.
+
+<DocsTable
+  columns={["Var", "Scope", "What it does"]}
+  rows={[
+    [
+      <code>RATE_LIMIT_PROVIDER</code>,
+      "all",
+      <>
+        <code>noop</code> / <code>memory</code> (default) / <code>upstash</code> / <code>unkey</code>.
+      </>,
+    ],
+    [
+      <code>UPSTASH_REDIS_REST_URL</code>,
+      "upstash",
+      "REST URL for the Upstash Redis database.",
+    ],
+    [
+      <code>UPSTASH_REDIS_REST_TOKEN</code>,
+      "upstash",
+      "REST token with read/write access.",
+    ],
+    [
+      <code>UNKEY_ROOT_KEY</code>,
+      "unkey",
+      "Root API key from the Unkey dashboard.",
+    ],
+    [
+      <code>UNKEY_RATELIMIT_NAMESPACE</code>,
+      "unkey",
+      <>Namespace prefix. Defaults to <code>orbit</code>.</>,
+    ],
+  ]}
+/>
+
+<DocsCallout kind="warn">
+  The <code>memory</code> adapter is single-process only — state is not shared across workers, is lost on restart, and does NOT protect a horizontally scaled or serverless deploy. The API warns at boot if it's used in production. See <code>/docs/integrations/rate-limiting</code> for the full rundown.
+</DocsCallout>
+
+## Uploads (optional)
+
+`UPLOADS_PROVIDER` picks the storage adapter behind `/v1/uploads`. Leave everything unset to disable uploads entirely — the UI hides the avatar upload affordance when it sees the disabled state.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `UPLOADS_PROVIDER` | unset | `uploadthing`, `s3`, or `noop`. When unset: `uploadthing` if a token is present, `s3` if the bucket keys are present, otherwise `noop`. `r2` is accepted as an alias for `s3`. |
+| `UPLOADTHING_TOKEN` | unset | Token for the hosted adapter. Objects are written private and read through signed URLs. |
+| `S3_ENDPOINT` | unset | Endpoint of an S3-compatible store. Cloudflare R2: `https://<account-id>.r2.cloudflarestorage.com`. Omit for AWS S3. |
+| `S3_BUCKET` | unset | Bucket name for the `s3` adapter. |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | unset | Credentials with object read/write on the bucket. |
+| `S3_REGION` | `auto` | Signing region. R2 accepts `auto`; AWS needs the bucket's region. |
+| `S3_KEY_PREFIX` | unset | Optional prefix so several environments can share one bucket. |
+| `S3_FORCE_PATH_STYLE` | `false` | Path-style addressing, needed by MinIO and most self-hosted gateways. |
+
+See [Uploads](/docs/integrations/uploads) for the Cloudflare R2 walkthrough.
+
+## Waitlist mode (optional)
+
+- `IS_WAITLIST_ENABLED` — `true` replaces the final step of `/onboarding` with a "you're on the list" screen instead of creating a workspace. `POST /v1/waitlist` accepts submissions regardless.
+- `WAITLIST_ADMIN_SECRET` — If set, `POST /v1/waitlist/accept` with `Authorization: Bearer <secret>` marks an entry approved.
+
+## Webhook tunneling (dev)
+
+<DocsTable
+  columns={["Var", "What it does"]}
+  rows={[
+    [
+      <code>SMEE_URL</code>,
+      "Your personal smee.io URL. Register it as your provider's webhook endpoint; the apps/webhook-tunnel workspace reads this and forwards POSTs to the local API.",
+    ],
+    [
+      <code>SMEE_TARGET_PATH</code>,
+      <>
+        Route to forward to. Defaults to <code>/v1/billing/webhooks/stripe</code> — switch to <code>/polar</code> or <code>/dodo</code> for the other adapters.
+      </>,
+    ],
+  ]}
+/>
+
+## Seed overrides (optional)
+
+The seed script reads a handful of env vars so you can point it at your own email and workspace slug in dev:
+
+- `SEED_OWNER_EMAIL` — default `owner@wereorbit.com`
+- `SEED_OWNER_NAME` — default `Demo Owner`
+- `SEED_WORKSPACE_SLUG` — default `demo`
+- `SEED_WORKSPACE_NAME` — default `Demo`
+
+## The web shells
+
+The TanStack and Next shells need only two build-time vars, baked into the bundle by Vite / Next at `build` time:
+
+<DocsTable
+  columns={["Var", "What it does"]}
+  rows={[
+    [
+      <code>VITE_API_URL</code>,
+      "Base URL the client hits for REST and WebSocket traffic.",
+    ],
+    [
+      <code>VITE_WEB_URL</code>,
+      "Canonical origin for the authenticated app — used in email links and share URLs.",
+    ],
+  ]}
+/>
+
+The marketing site (`apps/www`) needs only `VITE_WEB_URL`, for the sign-in and "get access" buttons.

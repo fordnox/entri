@@ -1,0 +1,112 @@
+---
+title: Postgres providers
+description: Any modern Postgres works. The only footgun is transaction poolers — reach for DIRECT_DATABASE_URL when you hit one.
+kicker: 06 · Deploy
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Orbit's only hard database requirement is PostgreSQL 14+ (the kit uses `WITH (auto_vacuum = ...)`-style features and Postgres-specific JSON operators). It does *not* ship its own database — `docker-compose.yml` leaves `DATABASE_URL` external on purpose. Pick a provider, point at it.
+
+## The env vars
+
+<DocsTable
+  columns={["Var", "Who reads it", "When to set it"]}
+  rows={[
+    [
+      <code>DATABASE_URL</code>,
+      "API runtime, migration tooling at build time, graphile-worker by default",
+      "Always.",
+    ],
+    [
+      <code>DIRECT_DATABASE_URL</code>,
+      "Migration CLI (drizzle-kit)",
+      <>Only when <code>DATABASE_URL</code> is a transaction pooler. Skip if you're hitting Postgres directly.</>,
+    ],
+    [
+      <code>WORKER_DATABASE_URL</code>,
+      "graphile-worker (jobs)",
+      <>Only when using graphile with a pooler upstream — workers need LISTEN/NOTIFY which poolers drop.</>,
+    ],
+  ]}
+/>
+
+<DocsCallout>
+  If you're not using graphile-worker (i.e. <code>JOBS_PROVIDER=qstash</code> or unset), you can ignore <code>WORKER_DATABASE_URL</code> entirely.
+</DocsCallout>
+
+## Provider recipes
+
+### Neon
+
+Serverless Postgres. The pooled and direct URLs are separate endpoints on the same database:
+
+**apps/api/.env (prod)**
+
+```
+# Pooled connection (PgBouncer in transaction mode, port 5432)
+DATABASE_URL="postgresql://user:pass@ep-xxx-pooler.region.aws.neon.tech/orbit?sslmode=require"
+
+# Direct connection for migrations + graphile LISTEN/NOTIFY
+DIRECT_DATABASE_URL="postgresql://user:pass@ep-xxx.region.aws.neon.tech/orbit?sslmode=require"
+WORKER_DATABASE_URL="${DIRECT_DATABASE_URL}"
+```
+
+Neon's pooler is the right thing to use at runtime (serverless-friendly connection counts), but migration tooling needs a direct session for advisory locks. The setup above covers both.
+
+### Supabase
+
+Same shape as Neon. Supabase exposes a pooler (Supavisor) on port `6543` and direct access on `5432`:
+
+```
+DATABASE_URL="postgresql://postgres.xxx:pass@aws-0-region.pooler.supabase.com:6543/postgres?pgbouncer=true"
+DIRECT_DATABASE_URL="postgresql://postgres:pass@db.xxx.supabase.co:5432/postgres"
+WORKER_DATABASE_URL="${DIRECT_DATABASE_URL}"
+```
+
+<DocsCallout kind="warn">
+  Supabase pooler URLs are usually written with <code>?pgbouncer=true</code>. The Drizzle <code>postgres</code> / <code>pg</code> drivers ignore the flag, so it's harmless to leave in place — just remember that PgBouncer in transaction mode doesn't support prepared statements, which is why migrations go through <code>DIRECT_DATABASE_URL</code>.
+</DocsCallout>
+
+### AWS RDS / Aurora
+
+RDS doesn't front with a pooler by default — the direct URL works for both runtime and migrations. Set only `DATABASE_URL`, skip the others:
+
+```
+DATABASE_URL="postgresql://orbit:pass@orbit-prod.xxxx.us-east-1.rds.amazonaws.com:5432/orbit?sslmode=verify-full"
+```
+
+If you're using RDS Proxy (transaction mode), add `DIRECT_DATABASE_URL` pointing at the cluster endpoint directly.
+
+### Railway Postgres
+
+The in-project Postgres add-on exposes both a public `DATABASE_PUBLIC_URL` and an internal-network `DATABASE_URL`. Use the internal one for the deployed API, the public one for local ops (running migrations from your laptop, ad-hoc queries). No pooler, so the direct-URL dance doesn't apply.
+
+### Fly Postgres
+
+Fly-managed Postgres sits inside the Fly private network. No pooler by default; reach it via `top1.nearest.of.<app>.internal`. The one wrinkle: Fly's backup semantics are more DIY than Neon or Supabase — read their operator docs before going to production.
+
+## When you actually need a pooler
+
+The ORM client holds a connection per in-flight operation. Under load, a direct connection model hits Postgres's `max_connections` quickly — especially on cheaper plans where it's 50 or 100. A transaction pooler lets 100 ORM calls share 10 backend connections.
+
+- **Neon, Supabase, Vercel Postgres** — pooler included.
+- **RDS, Fly Postgres, self-hosted** — add PgBouncer yourself, or size the DB up enough that you don't need to.
+
+## Migrations in prod
+
+Never run `drizzle-kit push` against production — it applies schema diffs without creating a migration file, so you lose the audit trail. Use `drizzle-kit migrate`, which only applies already-generated `.sql` files under `apps/api/drizzle/migrations/`:
+
+```bash
+npm exec --workspace=@orbit/api drizzle-kit migrate --config=drizzle/drizzle.config.ts
+```
+
+The API's Dockerfile has a `migrate` stage that runs exactly this command; docker-compose sequences it before the API via `service_completed_successfully`, and Railway's `preDeployCommand` does the same. For anywhere else, run it as a pre-deploy step — not at container start, to avoid races between replicas.
+
+## Backups & PITR
+
+Out of scope for Orbit, but worth saying: PITR is table-stakes the moment you have real users. Neon and Supabase bill for it; RDS does it via snapshots and WAL archival; self-hosted means running `pgBackRest` or similar. If your provider doesn't offer PITR on the plan you're on, upgrade before you launch.
+
+## Extensions
+
+The stock kit uses no extensions beyond what the ORM needs. If you add pgvector, pg_trgm, or timescaledb for feature work, document them in a migration (`CREATE EXTENSION IF NOT EXISTS ...`) so the migrate stage provisions them on every environment.

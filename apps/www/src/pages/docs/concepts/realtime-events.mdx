@@ -1,0 +1,136 @@
+---
+title: Realtime events over WebSocket + presence
+description: "One WebSocket connection per tab. A channel-based pub/sub hub. Domain events in, ServerEvent DTOs out."
+kicker: 02 · Concepts
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+Orbit ships realtime out of the box: every open tab holds a WebSocket to the API, and every domain event that happens — a member joining, a role changing, a subscription updating — lands in every other tab within a tick. The mechanism is deliberately small: no external broker, no Redis, no Pusher — an in-process pub/sub hub that reads from the event bus.
+
+<DocsCallout kind="warn">
+  In-process means in-process: one API node equals one hub. Scale beyond a single node by replacing <code>InProcessRealtimeHub</code> with a Redis or NATS-backed implementation of the same interface, or by sticky-routing WebSockets to the node that owns the workspace.
+</DocsCallout>
+
+## Channels
+
+The hub is pub/sub over string channel IDs. Three helpers name them consistently:
+
+**apps/api/src/realtime/hub.ts**
+
+```ts
+export const channels = {
+  workspace: (id: string) => `workspace:${id}`,
+  room:      (id: string) => `room:${id}`,
+  member:    (id: string) => `member:${id}`,
+};
+```
+
+<DocsTable
+  columns={["Channel", "Who subscribes", "What lands here"]}
+  rows={[
+    [
+      <code>{`workspace:{id}`}</code>,
+      "Every socket for members of the workspace",
+      "Members, roles, teams, subscriptions — anything workspace-wide.",
+    ],
+    [
+      <code>{`room:{id}`}</code>,
+      "Only sockets subscribed to that room",
+      "Room-scoped events. Useful for feature folders that add their own channels.",
+    ],
+    [
+      <code>{`member:{id}`}</code>,
+      "Every socket for one workspace-member",
+      "Direct signals to one member across their open tabs.",
+    ],
+  ]}
+/>
+
+## The connection lifecycle
+
+The WebSocket controller lives at `apps/api/src/interfaces/ws/`. Each connection follows the same four steps:
+
+1. **Upgrade at `/v1/ws`.** The handler resolves the session from cookies, reads `?workspace=<slug>`, and verifies the user is a member of the workspace. Authentication runs during the HTTP upgrade — a mismatch writes `HTTP/1.1 401 Unauthorized` back and aborts the handshake before any WebSocket is established.
+2. **Register the socket.** The controller builds a `SocketHandle` (id, send, close, workspaceId, workspaceMemberId, userId) and hands it to `hub.registerSocket(sock, [workspace, member])`. The member channel lets the presence tracker count sockets per member.
+3. **Stream ServerEvents.** Every `hub.broadcast(channel, event)` serializes to JSON and ships to matching sockets.
+4. **Heartbeat & cleanup.** A 25-second ping loop terminates sockets that don't pong. On `close`, the hub unregisters the socket and the presence tracker emits a `presence.update` if this was the member's last connection.
+
+## How domain events become ServerEvents
+
+`RealtimeEventPublisher` is a projector. It subscribes to each event type on the bus and translates them, one by one, into `ServerEvent` DTOs (declared in `@orbit/shared/realtime`). A typical handler re-reads the committed aggregate, hydrates the DTO it needs, and broadcasts:
+
+```ts
+this.bus.subscribe<WorkspaceMemberJoined>(
+  "workspaces.member.joined",
+  async (event) => {
+    const dto = await this.uow.read(async (tx) => {
+      const m = await tx.workspaceMembers.findById(event.memberId);
+      if (!m) return null;
+      const [user, role] = await Promise.all([
+        tx.users.findById(m.userId),
+        tx.workspaceRoles.findById(m.roleSnapshot.id),
+      ]);
+      return workspaceMemberToDTO(m, user, role);
+    });
+    if (!dto) return;
+    this.hub.broadcast(channels.workspace(event.workspaceId), {
+      type: "workspace.member.joined",
+      member: dto,
+    });
+  },
+);
+```
+
+<DocsCallout>
+  The projector's <code>uow.read()</code> can come back empty if the aggregate was deleted in a racing transaction between the commit and the broadcast. The handler silently drops that event — clients never see a broadcast about a row that no longer exists.
+</DocsCallout>
+
+## Presence
+
+`PresenceTracker` keeps a per-workspace set of online members and flips them on/off based on socket counts:
+
+- First socket for a member → broadcast `presence.update` (online: true) on the workspace channel.
+- Last socket closes → broadcast `presence.update` (online: false).
+- Idle sockets between join/leave don't re-broadcast — presence only flips on transitions.
+
+The client side keeps the current presence set in a dedicated store, so the sidebar "online now" indicators react without any polling.
+
+## On the client
+
+`apps/web-tanstack/src/lib/db/realtime.ts` holds the whole client. It opens a WebSocket pointed at `${VITE_API_URL}/v1/ws?workspace=${slug}`, parses each message, and dispatches into a set of entity stores:
+
+```ts
+function applyServerEvent(event: ServerEvent): void {
+  switch (event.type) {
+    case "workspace.member.joined":
+      membersStore.insert(event.member);
+      return;
+    case "workspace.member.role_changed":
+      membersStore.update(event.member.id, event.member);
+      return;
+    case "workspace.role.created":
+      rolesStore.insert(event.role);
+      return;
+    case "presence.update":
+      presenceStore.set(event.memberId, event.online);
+      return;
+    // ...one case per ServerEvent type
+  }
+}
+```
+
+The stores are TanStack Stores keyed by entity id. Components read them via hooks (`useMember`, `useRoles`, etc.) and re-render on change — no React Query invalidations needed, no polling, no websocket logic in the component tree.
+
+<DocsCallout>
+  React Query still handles initial hydration and the rare request-response call. Realtime owns the "something changed somewhere else" case; React Query owns "I asked for something."
+</DocsCallout>
+
+## Adding an event
+
+1. Emit a new `DomainEvent` from the aggregate.
+2. Add a matching entry to the `ServerEvent` union in `@orbit/shared/realtime`.
+3. Subscribe to it in `RealtimeEventPublisher` and broadcast on the appropriate channel.
+4. Handle it on the client in `applyServerEvent` — TypeScript will complain until you've covered every case.
+
+The full event catalog — every ServerEvent with its payload shape — will live under *Reference → Realtime event catalog*.

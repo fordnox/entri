@@ -1,0 +1,102 @@
+---
+title: Multi-tenant SaaS workspaces, teams & tenancy
+description: How Orbit's multi-tenant SaaS model scopes every row, every permission, and every realtime channel to a workspace.
+kicker: 02 · Concepts
+---
+
+import { DocsCallout, DocsTable } from "@/components/docs-layout";
+
+A **workspace** is Orbit's tenancy root. Every domain row that isn't a user sits inside exactly one workspace, and every API route resolves a workspace early — via `/v1/workspaces/:slug` — so the rest of the request can assume its scope without re-proving it. Teams, when the feature is on, nest *inside* a workspace: they're a narrower permission scope, never a tenant of their own.
+
+## The three aggregates
+
+<DocsTable
+  columns={["Aggregate", "Key", "What it is"]}
+  rows={[
+    [
+      <code>Workspace</code>,
+      <code>id</code>,
+      <>The tenant root. Has a globally unique <code>slug</code> (shows up in URLs), a name, and an <code>ownerId</code>. Holds no application data itself — it's the anchor others hang off.</>,
+    ],
+    [
+      <code>WorkspaceMember</code>,
+      <code>(workspaceId, userId)</code>,
+      <>One row per user × workspace pair. Holds an inlined <code>WorkspaceMemberRoleSnapshot</code> so authorization is an O(1) set lookup with no extra repository hop.</>,
+    ],
+    [
+      <code>WorkspaceInvite</code>,
+      <code>token</code>,
+      <>A pending invitation. Points at an email and optionally a role id. Becomes a <code>WorkspaceMember</code> when accepted.</>,
+    ],
+  ]}
+/>
+
+## The shape of a member
+
+`WorkspaceMember` is the aggregate you'll touch most often — it carries the role snapshot, which is what the permission guards read:
+
+**apps/api/src/workspaces/domain/workspace-member.ts**
+
+```ts
+export interface WorkspaceMemberRoleSnapshot {
+  id: WorkspaceRoleId;
+  systemKey: WorkspaceRoleSystemKey | null; // OWNER | ADMIN | MEMBER | null
+  permissions: readonly WorkspacePermission[];
+}
+
+export class WorkspaceMember {
+  static join(input: { workspaceId, userId, role, seed }, clock): WorkspaceMember;
+  changeRole(next: WorkspaceMemberRoleSnapshot, changedByMemberId): void;
+  hasPermission(p: WorkspacePermission): boolean;
+  leave(): void;
+}
+```
+
+Each mutation enqueues a domain event onto the aggregate — `WorkspaceMemberJoined`, `WorkspaceMemberRoleChanged`, `WorkspaceMemberLeft` — collected by the Unit of Work and dispatched after commit. The realtime publisher listens and pushes DTOs to every socket on the workspace channel.
+
+## How teams fit in
+
+Teams are an *optional* feature (`--no-teams` strips them at scaffold time). When on, they add a parallel aggregate family under `apps/api/src/teams/`:
+
+- `Team` — keyed by `id`, belongs to a workspace, has its own slug scoped within that workspace.
+- `TeamMember` — keyed by `(teamId, workspaceMemberId)`. A team member must already be a workspace member; teams *narrow* scope, they never widen it.
+- `TeamRole` — system roles `TEAM_ADMIN` and `TEAM_MEMBER`, plus any custom roles. Permissions are exclusively `team.*` — see the PBAC page.
+
+<DocsCallout>
+  The nesting only goes one level deep. There are no sub-teams, and there's no team-of-teams. The assumption is that "workspace" is your billing/admin boundary and "team" is your organizational boundary inside it.
+</DocsCallout>
+
+## URLs and scoping
+
+Every authenticated route on the API lives under `/v1/workspaces/:slug/...`. The session middleware resolves the slug to a workspace and the caller's `WorkspaceMember` once, stashes both on the context, and every downstream handler reads them from there — no handler looks up a workspace by itself.
+
+**A typical request path**
+
+```
+GET /v1/workspaces/demo/members
+  ↓ session middleware
+    resolves user from cookie
+    resolves workspace "demo"
+    resolves WorkspaceMember (user, workspace)
+    fails with 404 if the user isn't a member
+  ↓ controller
+    reads c.get("me") — no extra round-trip
+```
+
+On the web side, the router mirrors this: the authenticated shell's root route is `/d/$workspaceSlug`, and everything inside is workspace-scoped. The store layer (`workspace-stores.ts`) keys every realtime cache by workspace, so switching workspaces is a full reset, not a filter.
+
+## Invites and joining
+
+The invite flow is intentionally one-shot:
+
+1. A member with `workspace.members.invite` creates a `WorkspaceInvite` row. The service emits a `WorkspaceInvited` event post-commit.
+2. A projector listens for that event and asks the Mailer port to send an email with a link to `${WEB_ORIGIN}/invites/accept?token=...`.
+3. The recipient clicks, signs in if they haven't already, and `POST /v1/invites/accept` swaps the invite for a `WorkspaceMember` on the embedded role.
+
+<DocsCallout>
+  Accept is idempotent — replaying a token that's already been consumed returns the existing membership instead of 400'ing. Keeps double-clicks from breaking the flow.
+</DocsCallout>
+
+### The owner special-case
+
+The `ownerId` column on `Workspace` is load-bearing: the OWNER system role is permission-locked to the full workspace-permission set, and workspace owners bypass all `team.*` guards outright (see `TeamsController.requireTeamPermission`). You can demote an admin; you can't demote the owner without transferring ownership first.
