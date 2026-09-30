@@ -32,6 +32,10 @@ export type WorkspacePermission =
   | "workspace.members.invite"
   | "workspace.members.remove"
   | "workspace.members.change_role"
+  | "connect.applications.view"
+  | "connect.applications.manage"
+  | "connect.domains.view"
+  | "connect.domains.manage"
   // +feature:billing
   | "billing.view"
   | "billing.manage"
@@ -55,6 +59,10 @@ export const ALL_WORKSPACE_PERMISSIONS: readonly WorkspacePermission[] = [
   "workspace.members.invite",
   "workspace.members.remove",
   "workspace.members.change_role",
+  "connect.applications.view",
+  "connect.applications.manage",
+  "connect.domains.view",
+  "connect.domains.manage",
   // +feature:billing
   "billing.view",
   "billing.manage",
@@ -131,6 +139,34 @@ export const PERMISSION_GROUPS: readonly PermissionGroup[] = [
       },
     ],
   },
+  {
+    group: "Connect",
+    scope: "workspace",
+    items: [
+      {
+        permission: "connect.applications.view",
+        label: "View applications",
+        description:
+          "See Connect applications, their public IDs, and webhook delivery history.",
+      },
+      {
+        permission: "connect.applications.manage",
+        label: "Manage applications",
+        description:
+          "Create, edit, and delete applications; rotate secrets and webhook signing keys.",
+      },
+      {
+        permission: "connect.domains.view",
+        label: "View domains",
+        description: "See every domain your end users connected and its DNS status.",
+      },
+      {
+        permission: "connect.domains.manage",
+        label: "Manage domains",
+        description: "Re-verify or remove connected domains.",
+      },
+    ],
+  },
   // +feature:billing
   {
     group: "Billing",
@@ -196,6 +232,10 @@ export const DEFAULT_ADMIN_PERMISSIONS: readonly WorkspacePermission[] = [
   "workspace.members.invite",
   "workspace.members.remove",
   "workspace.members.change_role",
+  "connect.applications.view",
+  "connect.applications.manage",
+  "connect.domains.view",
+  "connect.domains.manage",
   // +feature:billing
   "billing.view",
   // -feature:billing
@@ -205,6 +245,8 @@ export const DEFAULT_ADMIN_PERMISSIONS: readonly WorkspacePermission[] = [
 ];
 
 export const DEFAULT_MEMBER_PERMISSIONS: readonly WorkspacePermission[] = [
+  "connect.applications.view",
+  "connect.domains.view",
 ];
 
 export function defaultPermissionsFor(

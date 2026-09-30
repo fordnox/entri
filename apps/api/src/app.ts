@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
@@ -35,16 +36,27 @@ export function createApp(container: AppContainer = buildContainer(readConfig())
       },
     }),
   );
-  app.use(
-    "*",
-    cors({
-      origin: expandLoopbackOrigins([
-        container.config.webOrigin,
-        container.config.wwwOrigin,
-        ...container.config.additionalOrigins,
-      ]),
-      credentials: true,
-    }),
+  // The Connect SDK runs on integrators' sites, so its API is open to any
+  // origin — but without credentials, so cookies never ride along.
+  // Per-application origin allow-lists are enforced on the token.
+  const connectCors = cors({
+    origin: "*",
+    allowMethods: ["GET", "POST", "OPTIONS"],
+    allowHeaders: ["authorization", "content-type"],
+    maxAge: 600,
+  });
+  const appCors = cors({
+    origin: expandLoopbackOrigins([
+      container.config.webOrigin,
+      container.config.wwwOrigin,
+      ...container.config.additionalOrigins,
+    ]),
+    credentials: true,
+  });
+  app.use("*", (c, next) =>
+    c.req.path.startsWith("/v1/connect/") || c.req.path.startsWith("/sdk/")
+      ? connectCors(c, next)
+      : appCors(c, next),
   );
   app.use("*", injectContainer(container));
 
@@ -86,6 +98,19 @@ export function createApp(container: AppContainer = buildContainer(readConfig())
 
   app.route("/health", health);
   app.route("/v1", buildRouter());
+
+  app.get("/sdk/connect.js", async (c) => {
+    let bundle: string;
+    try {
+      bundle = await readFile(container.config.connect.sdkBundlePath, "utf8");
+    } catch {
+      return c.text("// Connect SDK not built — run `npm run build --workspace @orbit/connect-js`", 404);
+    }
+    return c.body(bundle, 200, {
+      "content-type": "application/javascript; charset=utf-8",
+      "cache-control": "public, max-age=300",
+    });
+  });
 
   app.get("/", (c) => c.json({ name: "@orbit/api", ok: true }));
 

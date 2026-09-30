@@ -12,6 +12,7 @@
   "dependencies": {
     "@livekit/components-react": "^2.9.20",
     "@livekit/components-styles": "^1.2.0",
+    "@orbit/connect-js": "*",
     "@orbit/shared": "*",
     "@orbit/ui": "*",
     "@tailwindcss/vite": "^4.2.2",

@@ -92,9 +92,10 @@ export const Route = createRootRouteWithContext<OrbitRouterContext>()({
 })
 
 function RootComponent() {
+  const { queryClient } = Route.useRouteContext()
   return (
     <RootDocument>
-      <AppQueryProvider>
+      <AppQueryProvider client={queryClient}>
         <ToastProvider>
           {/* +feature:realtime */}
           <RealtimeProvider>

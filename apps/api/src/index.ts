@@ -56,6 +56,7 @@ if (config.jobs.enabled) {
 
 const shutdown = (signal: NodeJS.Signals) => {
   log.info({ action: "api.shutdown", signal });
+  container.services.connectWebhooks.stop();
   // +feature:jobs
   void jobRuntime.stop().catch((err) =>
     log.error({

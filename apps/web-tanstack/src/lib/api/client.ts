@@ -25,6 +25,18 @@ import type {
   WorkspaceRoleSystemKey,
 } from "@orbit/shared/permissions";
 import type { OrbitThemeMode, OrbitThemePalette } from "@orbit/shared/themes";
+import type {
+  ApplicationWithSecretDTO,
+  ConnectApplicationDTO,
+  CreateApplicationRequest,
+  DnsProviderDTO,
+  DomainConnectionListItemDTO,
+  DomainConnectionPageDTO,
+  DomainConnectionStatus,
+  TestTokenResponse,
+  UpdateApplicationRequest,
+  WebhookDeliveryDTO,
+} from "@orbit/shared/connect";
 import { API_URL } from "@/lib/urls";
 
 
@@ -267,7 +279,7 @@ export const api = {
     // +feature:audit-log
     listAudit: (
       slug: string,
-      opts?: { cursor?: string; limit?: number; q?: string; teamId?: TeamId },
+      opts?: { cursor?: string; limit?: number; q?: string },
     ) => {
       const params = new URLSearchParams();
       if (opts?.cursor) params.set("cursor", opts.cursor);
@@ -324,6 +336,96 @@ export const api = {
       }),
   },
   // -feature:billing
+
+  connect: {
+    /** Public provider catalog (`GET /v1/connect/providers`). */
+    providers: () => request<DnsProviderDTO[]>("/v1/connect/providers"),
+
+    applications: {
+      list: (slug: string) =>
+        request<ConnectApplicationDTO[]>(
+          `/v1/workspaces/${slug}/connect/applications`,
+        ),
+      create: (slug: string, body: CreateApplicationRequest) =>
+        request<ApplicationWithSecretDTO>(
+          `/v1/workspaces/${slug}/connect/applications`,
+          { method: "POST", body: JSON.stringify(body) },
+        ),
+      get: (slug: string, appId: string) =>
+        request<ConnectApplicationDTO>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}`,
+        ),
+      update: (slug: string, appId: string, body: UpdateApplicationRequest) =>
+        request<ConnectApplicationDTO>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}`,
+          { method: "PATCH", body: JSON.stringify(body) },
+        ),
+      delete: (slug: string, appId: string) =>
+        request<void>(`/v1/workspaces/${slug}/connect/applications/${appId}`, {
+          method: "DELETE",
+        }),
+      rotateSecret: (slug: string, appId: string) =>
+        request<ApplicationWithSecretDTO>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}/rotate-secret`,
+          { method: "POST", body: "{}" },
+        ),
+      rotateWebhookSecret: (slug: string, appId: string) =>
+        request<ConnectApplicationDTO>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}/rotate-webhook-secret`,
+          { method: "POST", body: "{}" },
+        ),
+      testToken: (slug: string, appId: string) =>
+        request<TestTokenResponse>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}/test-token`,
+          { method: "POST", body: "{}" },
+        ),
+      testWebhook: (slug: string, appId: string) =>
+        request<WebhookDeliveryDTO>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}/test-webhook`,
+          { method: "POST", body: "{}" },
+        ),
+      deliveries: (slug: string, appId: string) =>
+        request<WebhookDeliveryDTO[]>(
+          `/v1/workspaces/${slug}/connect/applications/${appId}/deliveries`,
+        ),
+    },
+
+    domains: {
+      list: (
+        slug: string,
+        opts?: {
+          applicationId?: string;
+          status?: DomainConnectionStatus;
+          q?: string;
+          cursor?: string;
+        },
+      ) => {
+        const params = new URLSearchParams();
+        if (opts?.applicationId) params.set("applicationId", opts.applicationId);
+        if (opts?.status) params.set("status", opts.status);
+        const q = opts?.q?.trim();
+        if (q) params.set("q", q);
+        if (opts?.cursor) params.set("cursor", opts.cursor);
+        const qs = params.toString();
+        return request<DomainConnectionPageDTO>(
+          `/v1/workspaces/${slug}/connect/domains${qs ? `?${qs}` : ""}`,
+        );
+      },
+      get: (slug: string, connectionId: string) =>
+        request<DomainConnectionListItemDTO>(
+          `/v1/workspaces/${slug}/connect/domains/${connectionId}`,
+        ),
+      verify: (slug: string, connectionId: string) =>
+        request<DomainConnectionListItemDTO>(
+          `/v1/workspaces/${slug}/connect/domains/${connectionId}/verify`,
+          { method: "POST", body: "{}" },
+        ),
+      delete: (slug: string, connectionId: string) =>
+        request<void>(`/v1/workspaces/${slug}/connect/domains/${connectionId}`, {
+          method: "DELETE",
+        }),
+    },
+  },
 
   invites: {
     accept: (token: string) =>

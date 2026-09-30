@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect SDK playground</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --card:#fff; --text:#14171c; --muted:#5b6470; --border:#e3e6ea; --accent:#2f5bea; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1115; --card:#16181d; --text:#eef0f3; --muted:#a3aab4; --border:#2c3038; --accent:#5b82ff; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; padding: 32px 16px; }
+  main { max-width: 760px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 22px; margin: 0; }
+  p { margin: 0; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  label { display: grid; gap: 4px; font-weight: 550; font-size: 13px; }
+  input, textarea { font: inherit; font-size: 13px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: inherit; width: 100%; }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; min-height: 180px; resize: vertical; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .check { display: flex; gap: 6px; align-items: center; font-weight: 400; }
+  .check input { width: auto; }
+  button { font: inherit; font-weight: 600; padding: 10px 16px; border-radius: 8px; border: 0; background: var(--accent); color: #fff; cursor: pointer; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  #log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; white-space: pre-wrap; max-height: 320px; overflow: auto; margin: 0; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Connect SDK playground</h1>
+  <p>Run <code>npm run build --workspace @orbit/connect-js</code> first. Mint a token with
+     <code>POST /v1/connect/token</code> (or the dashboard's "test token" button) and paste it below.</p>
+
+  <section class="card">
+    <div class="grid">
+      <label>Application ID <input id="applicationId" placeholder="app_…"></label>
+      <label>API origin <input id="apiOrigin" value="http://localhost:4002"></label>
+    </div>
+    <label>Auth token <input id="token" placeholder="eyJ…"></label>
+    <div class="grid">
+      <label>Prefilled domain <input id="prefilledDomain" placeholder="acme.com"></label>
+      <label>User ID <input id="userId" placeholder="cus_123"></label>
+    </div>
+    <label>dnsRecords (JSON)
+      <textarea id="dnsRecords" spellcheck="false">{
+  "domain": [
+    { "type": "A", "host": "@", "value": "76.76.21.21", "ttl": 300 },
+    { "type": "CNAME", "host": "www", "value": "cname.yourapp.com" }
+  ],
+  "subDomain": [
+    { "type": "CNAME", "host": "@", "value": "cname.yourapp.com" }
+  ]
+}</textarea>
+    </label>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="forceManualSetup"> Force manual setup</label>
+    </div>
+    <div class="row">
+      <button id="open" type="button">Connect a domain</button>
+      <button id="clear" type="button" class="secondary">Clear log</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <strong>Event log</strong>
+    <pre id="log"></pre>
+  </section>
+</main>
+
+<script src="../dist/connect.js"></script>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const logEl = $("log");
+  function log(label, data) {
+    const line = `[${new Date().toLocaleTimeString()}] ${label}` + (data === undefined ? "" : " " + JSON.stringify(data));
+    logEl.textContent = line + "\n" + logEl.textContent;
+  }
+
+  // Remember inputs between reloads.
+  const fields = ["applicationId", "apiOrigin", "token", "prefilledDomain", "userId", "dnsRecords"];
+  for (const f of fields) {
+    try { const v = localStorage.getItem("connect-example:" + f); if (v !== null) $(f).value = v; } catch {}
+    $(f).addEventListener("input", () => { try { localStorage.setItem("connect-example:" + f, $(f).value); } catch {} });
+  }
+
+  window.addEventListener("onConnectStepChange", (e) => log("window onConnectStepChange", e.detail));
+  window.addEventListener("onConnectSuccess", (e) => log("window onConnectSuccess", e.detail));
+  window.addEventListener("onConnectClose", (e) => log("window onConnectClose", e.detail));
+
+  $("clear").addEventListener("click", () => { logEl.textContent = ""; });
+  $("open").addEventListener("click", () => {
+    let dnsRecords;
+    try { dnsRecords = JSON.parse($("dnsRecords").value); }
+    catch (err) { log("Invalid dnsRecords JSON: " + err.message); return; }
+    try {
+      Connect.showConnect({
+        applicationId: $("applicationId").value.trim(),
+        token: $("token").value.trim(),
+        apiOrigin: $("apiOrigin").value.trim() || undefined,
+        prefilledDomain: $("prefilledDomain").value.trim() || undefined,
+        userId: $("userId").value.trim() || undefined,
+        forceManualSetup: $("forceManualSetup").checked,
+        dnsRecords,
+        metadata: { source: "connect-js example" },
+        onStepChange: (step) => log("onStepChange", step),
+        onSuccess: (r) => log("onSuccess", r),
+        onClose: (r) => log("onClose", r),
+      });
+    } catch (err) {
+      log("showConnect threw: " + err.message);
+    }
+  });
+  log("SDK loaded", { version: window.Connect && Connect.version });
+</script>
+</body>
+</html>
